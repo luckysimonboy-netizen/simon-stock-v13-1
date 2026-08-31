@@ -1,33 +1,40 @@
 """
-Simon Stock V13.1 Foundation
-AI Orchestrator
+Simon Stock V13.2
+AI Brain / Research Orchestrator
 
-AI architecture:
+Architecture
 
-Market / Fundamental Data
-            ↓
-      Research Agents
-            ↓
- ┌──────────┼──────────┐
- ↓          ↓          ↓
-Value    Business    Growth
-Agent    Agent       Agent
-            ↓
-       Event Agent
-            ↓
-      Bull / Bear Debate
-            ↓
-   Investment Committee
-            ↓
-      Final AI Report
+Market Data
+     ↓
+Quant Engine
+     ↓
+Fundamental Evidence
+     ↓
+Research Agents
+     ↓
+Contradiction Engine
+     ↓
+Bull / Bear Debate
+     ↓
+Investment Committee
+     ↓
+Structured AI Verdict
 
-The AI layer is deliberately provider-agnostic.
+Design principles:
+- Provider agnostic
+- Evidence first
+- AI reasoning second
+- Never invent unavailable data
+- Structured output
+- Graceful degradation
+- Compatible with V13.1
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
@@ -42,8 +49,19 @@ import requests
 DEFAULT_TIMEOUT = 45
 DEFAULT_RETRIES = 2
 
-MAX_CONTEXT_CHARS = 18000
-MAX_OUTPUT_TOKENS = 4000
+MAX_CONTEXT_CHARS = 22000
+MAX_PROMPT_CHARS = 30000
+MAX_OUTPUT_TOKENS = 5000
+
+SUPPORTED_PROVIDERS = {
+    "gemini",
+    "openrouter",
+    "groq",
+}
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 # ============================================================
@@ -58,6 +76,7 @@ class AIResponse:
     content: str
     error: Optional[str] = None
     latency_ms: Optional[int] = None
+    usage: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -76,41 +95,62 @@ class ResearchOpinion:
         return asdict(self)
 
 
+@dataclass
+class AIVerdict:
+    ticker: str
+    verdict: str
+    confidence: float
+    horizon: str
+    business_quality: float
+    moat: float
+    growth: float
+    valuation: float
+    risk: float
+    thesis: str
+    bull_case: str
+    base_case: str
+    bear_case: str
+    key_catalyst: str
+    key_risk: str
+    invalidation: List[str]
+    evidence: List[str]
+    uncertainty: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 # ============================================================
-# Environment Helpers
+# Environment
 # ============================================================
 
 def get_env(name: str, default: str = "") -> str:
-    """
-    Safely retrieve an environment variable.
-    """
-
     value = os.getenv(name)
 
     if value is None:
         return default
 
-    return value.strip()
+    return str(value).strip()
 
 
-def get_api_key() -> str:
+def get_api_key(provider: Optional[str] = None) -> str:
     """
-    Read the primary AI key.
+    Get API key for a specific provider.
 
-    Supported environment names:
-
-        GEMINI_API_KEY
-        GOOGLE_API_KEY
-        OPENROUTER_API_KEY
-        GROQ_API_KEY
-
-    Priority:
-
-        GEMINI_API_KEY
-        GOOGLE_API_KEY
-        OPENROUTER_API_KEY
-        GROQ_API_KEY
+    If provider is omitted, return the first configured key.
     """
+
+    if provider == "gemini":
+        return (
+            get_env("GEMINI_API_KEY")
+            or get_env("GOOGLE_API_KEY")
+        )
+
+    if provider == "openrouter":
+        return get_env("OPENROUTER_API_KEY")
+
+    if provider == "groq":
+        return get_env("GROQ_API_KEY")
 
     candidates = [
         "GEMINI_API_KEY",
@@ -120,7 +160,6 @@ def get_api_key() -> str:
     ]
 
     for name in candidates:
-
         value = get_env(name)
 
         if value:
@@ -135,7 +174,7 @@ def get_api_key() -> str:
 
 def detect_provider() -> str:
     """
-    Detect the configured AI provider.
+    Detect the best configured provider.
 
     Priority:
         Gemini
@@ -143,84 +182,118 @@ def detect_provider() -> str:
         Groq
     """
 
-    if get_env("GEMINI_API_KEY"):
+    if get_api_key("gemini"):
         return "gemini"
 
-    if get_env("GOOGLE_API_KEY"):
-        return "gemini"
-
-    if get_env("OPENROUTER_API_KEY"):
+    if get_api_key("openrouter"):
         return "openrouter"
 
-    if get_env("GROQ_API_KEY"):
+    if get_api_key("groq"):
         return "groq"
 
     return "none"
 
 
 def get_model(provider: Optional[str] = None) -> str:
-    """
-    Get configured model.
-
-    Environment overrides:
-
-        GEMINI_MODEL
-        OPENROUTER_MODEL
-        GROQ_MODEL
-    """
-
     provider = provider or detect_provider()
 
     if provider == "gemini":
         return get_env(
             "GEMINI_MODEL",
-            "gemini-2.5-flash"
+            DEFAULT_GEMINI_MODEL,
         )
 
     if provider == "openrouter":
         return get_env(
             "OPENROUTER_MODEL",
-            "google/gemini-2.5-flash"
+            DEFAULT_OPENROUTER_MODEL,
         )
 
     if provider == "groq":
         return get_env(
             "GROQ_MODEL",
-            "llama-3.3-70b-versatile"
+            DEFAULT_GROQ_MODEL,
         )
 
     return ""
 
 
 # ============================================================
-# Context Sanitization
+# Context Utilities
 # ============================================================
+
+def _safe_json_value(value: Any) -> Any:
+    """
+    Convert common Python / pandas values into
+    JSON-safe representations.
+    """
+
+    if value is None:
+        return None
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+
+    if isinstance(value, dict):
+        return {
+            str(k): _safe_json_value(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _safe_json_value(v)
+            for v in value
+        ]
+
+    return value
+
 
 def sanitize_context(
     context: Dict[str, Any],
-    max_chars: int = MAX_CONTEXT_CHARS
+    max_chars: int = MAX_CONTEXT_CHARS,
 ) -> str:
     """
-    Convert stock data into compact JSON.
+    Convert research data into compact JSON.
 
-    Large historical datasets are intentionally not
-    dumped into the model context.
+    Historical DataFrames are excluded because they can
+    consume enormous amounts of context.
     """
 
-    clean = {}
+    if not isinstance(context, dict):
+        context = {
+            "data": context
+        }
+
+    clean: Dict[str, Any] = {}
 
     for key, value in context.items():
 
-        if key == "history":
+        # Never dump raw history into AI context.
+        if str(key).lower() in {
+            "history",
+            "ohlcv",
+            "price_history",
+        }:
             continue
 
+        # DataFrame-like objects
         if hasattr(value, "to_dict"):
             try:
                 value = value.to_dict()
             except Exception:
                 value = str(value)
 
-        clean[key] = value
+        clean[key] = _safe_json_value(value)
 
     try:
 
@@ -228,6 +301,7 @@ def sanitize_context(
             clean,
             ensure_ascii=False,
             default=str,
+            separators=(",", ":"),
         )
 
     except Exception:
@@ -244,66 +318,166 @@ def sanitize_context(
     return text
 
 
+def compact_prompt(prompt: str) -> str:
+    """
+    Prevent accidental oversized prompts.
+    """
+
+    if len(prompt) <= MAX_PROMPT_CHARS:
+        return prompt
+
+    return (
+        prompt[:MAX_PROMPT_CHARS]
+        + "\n...[prompt truncated]"
+    )
+
+
 # ============================================================
-# Core Prompt
+# System Prompt
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are Simon Stock AI, an advanced US equity research assistant.
+You are Simon Stock AI, an advanced US equity research engine.
 
-Your job is to analyze companies using evidence rather than hype.
+Your job is to reason about publicly traded companies using
+available evidence.
 
-Important rules:
+CORE RULES
 
-1. Never pretend that unavailable data exists.
-2. Separate facts from assumptions.
-3. Clearly identify uncertainty.
-4. Never guarantee returns.
-5. Distinguish investment quality from short-term price momentum.
-6. Explain the reasoning behind every important conclusion.
-7. When evidence conflicts, explicitly describe the conflict.
-8. Consider both bullish and bearish scenarios.
-9. Treat valuation as a range, not a magic number.
-10. Risk management is part of the conclusion.
+1. Never invent unavailable data.
+2. Never fabricate earnings, prices, analyst targets,
+   news, macro events, or financial ratios.
+3. Clearly distinguish facts from assumptions.
+4. Explicitly identify uncertainty.
+5. Never guarantee investment returns.
+6. Separate business quality from stock-price momentum.
+7. Treat valuation as a range rather than a magic number.
+8. Consider opportunity cost.
+9. Always analyze both upside and downside.
+10. When evidence conflicts, explain the conflict.
+11. If a requested metric is unavailable, say so.
+12. Do not hide important risks merely because the thesis is bullish.
+13. Do not become bullish merely because momentum is strong.
+14. Do not become bearish merely because valuation is high.
+15. Quantitative scores are evidence, not truth.
 
-You may use four analytical lenses:
+ANALYTICAL FRAMEWORKS
 
-VALUE:
-- moat
-- cash flow
+VALUE
+- free cash flow
+- earnings durability
+- balance sheet
 - capital allocation
 - valuation
 - margin of safety
 
-BUSINESS:
+BUSINESS
 - business model
 - pricing power
+- customer switching costs
+- network effects
+- competitive moat
 - management
-- corporate culture
 - shareholder alignment
 - opportunity cost
 
-FIRST PRINCIPLES:
+FIRST PRINCIPLES
 - underlying economics
-- technological disruption
+- technology
 - cost structure
-- market size
 - scalability
+- market size
+- disruption
 - execution constraints
+- long-term growth ceiling
 
-EVENT / MARKET:
-- macro environment
-- policy
+EVENT / MARKET
+- macro
+- rates
 - regulation
 - tariffs
-- market sentiment
+- geopolitics
 - catalysts
+- market sentiment
 - positioning
+- event risk
 
-Do not impersonate or claim to be any real investor.
+IMPORTANT
 
-Use the frameworks as analytical methodologies only.
+You are an analytical system.
+
+Do not impersonate Warren Buffett,
+Charlie Munger, Peter Lynch,
+Ray Dalio, or any other real investor.
+
+Use investment frameworks as methodologies,
+not as personas.
 """
+
+
+# ============================================================
+# JSON Extraction
+# ============================================================
+
+def extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract JSON from a model response.
+
+    Handles:
+    - pure JSON
+    - markdown JSON blocks
+    - surrounding prose
+    """
+
+    if not text:
+        return None
+
+    cleaned = text.strip()
+
+    # Remove markdown fences.
+    cleaned = re.sub(
+        r"^```(?:json)?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    cleaned = re.sub(
+        r"```$",
+        "",
+        cleaned,
+    )
+
+    cleaned = cleaned.strip()
+
+    # Direct JSON.
+    try:
+        parsed = json.loads(cleaned)
+
+        if isinstance(parsed, dict):
+            return parsed
+
+    except Exception:
+        pass
+
+    # Search first JSON object.
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+
+    if start >= 0 and end > start:
+
+        candidate = cleaned[start:end + 1]
+
+        try:
+            parsed = json.loads(candidate)
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        except Exception:
+            pass
+
+    return None
 
 
 # ============================================================
@@ -316,31 +490,24 @@ def call_gemini(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> AIResponse:
 
-    api_key = (
-        get_env("GEMINI_API_KEY")
-        or get_env("GOOGLE_API_KEY")
-    )
+    api_key = get_api_key("gemini")
+
+    model = model or get_model("gemini")
 
     if not api_key:
 
         return AIResponse(
             success=False,
             provider="gemini",
-            model=model or "",
+            model=model,
             content="",
             error="Gemini API key is not configured.",
         )
-
-    model = model or get_model("gemini")
 
     url = (
         "https://generativelanguage.googleapis.com/"
         f"v1beta/models/{model}:generateContent"
     )
-
-    params = {
-        "key": api_key
-    }
 
     payload = {
         "systemInstruction": {
@@ -355,13 +522,13 @@ def call_gemini(
                 "role": "user",
                 "parts": [
                     {
-                        "text": prompt
+                        "text": compact_prompt(prompt)
                     }
-                ]
+                ],
             }
         ],
         "generationConfig": {
-            "temperature": 0.25,
+            "temperature": 0.20,
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
         },
     }
@@ -372,14 +539,13 @@ def call_gemini(
 
         response = requests.post(
             url,
-            params=params,
+            params={"key": api_key},
             json=payload,
             timeout=timeout,
         )
 
         latency = int(
-            (time.perf_counter() - started)
-            * 1000
+            (time.perf_counter() - started) * 1000
         )
 
         if response.status_code != 200:
@@ -391,7 +557,7 @@ def call_gemini(
                 content="",
                 error=(
                     f"HTTP {response.status_code}: "
-                    f"{response.text[:500]}"
+                    f"{response.text[:800]}"
                 ),
                 latency_ms=latency,
             )
@@ -400,7 +566,7 @@ def call_gemini(
 
         candidates = data.get(
             "candidates",
-            []
+            [],
         )
 
         if not candidates:
@@ -437,12 +603,17 @@ def call_gemini(
                 latency_ms=latency,
             )
 
+        usage = data.get(
+            "usageMetadata"
+        )
+
         return AIResponse(
             success=True,
             provider="gemini",
             model=model,
             content=content,
             latency_ms=latency,
+            usage=usage,
         )
 
     except requests.RequestException as exc:
@@ -466,29 +637,30 @@ def call_openrouter(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> AIResponse:
 
-    api_key = get_env(
-        "OPENROUTER_API_KEY"
-    )
+    api_key = get_api_key("openrouter")
+
+    model = model or get_model("openrouter")
 
     if not api_key:
 
         return AIResponse(
             success=False,
             provider="openrouter",
-            model=model or "",
+            model=model,
             content="",
             error="OpenRouter API key is not configured.",
         )
 
-    model = model or get_model("openrouter")
-
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = (
+        "https://openrouter.ai/api/v1/"
+        "chat/completions"
+    )
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://streamlit.io",
-        "X-Title": "Simon Stock V13.1",
+        "X-Title": "Simon Stock V13.2",
     }
 
     payload = {
@@ -500,10 +672,10 @@ def call_openrouter(
             },
             {
                 "role": "user",
-                "content": prompt,
+                "content": compact_prompt(prompt),
             },
         ],
-        "temperature": 0.25,
+        "temperature": 0.20,
         "max_tokens": MAX_OUTPUT_TOKENS,
     }
 
@@ -519,8 +691,7 @@ def call_openrouter(
         )
 
         latency = int(
-            (time.perf_counter() - started)
-            * 1000
+            (time.perf_counter() - started) * 1000
         )
 
         if response.status_code != 200:
@@ -532,7 +703,7 @@ def call_openrouter(
                 content="",
                 error=(
                     f"HTTP {response.status_code}: "
-                    f"{response.text[:500]}"
+                    f"{response.text[:800]}"
                 ),
                 latency_ms=latency,
             )
@@ -541,7 +712,7 @@ def call_openrouter(
 
         choices = data.get(
             "choices",
-            []
+            [],
         )
 
         if not choices:
@@ -578,6 +749,7 @@ def call_openrouter(
             model=model,
             content=str(content),
             latency_ms=latency,
+            usage=data.get("usage"),
         )
 
     except requests.RequestException as exc:
@@ -601,23 +773,24 @@ def call_groq(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> AIResponse:
 
-    api_key = get_env(
-        "GROQ_API_KEY"
-    )
+    api_key = get_api_key("groq")
+
+    model = model or get_model("groq")
 
     if not api_key:
 
         return AIResponse(
             success=False,
             provider="groq",
-            model=model or "",
+            model=model,
             content="",
             error="Groq API key is not configured.",
         )
 
-    model = model or get_model("groq")
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = (
+        "https://api.groq.com/openai/v1/"
+        "chat/completions"
+    )
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -633,10 +806,10 @@ def call_groq(
             },
             {
                 "role": "user",
-                "content": prompt,
+                "content": compact_prompt(prompt),
             },
         ],
-        "temperature": 0.25,
+        "temperature": 0.20,
         "max_tokens": MAX_OUTPUT_TOKENS,
     }
 
@@ -652,8 +825,7 @@ def call_groq(
         )
 
         latency = int(
-            (time.perf_counter() - started)
-            * 1000
+            (time.perf_counter() - started) * 1000
         )
 
         if response.status_code != 200:
@@ -665,7 +837,7 @@ def call_groq(
                 content="",
                 error=(
                     f"HTTP {response.status_code}: "
-                    f"{response.text[:500]}"
+                    f"{response.text[:800]}"
                 ),
                 latency_ms=latency,
             )
@@ -674,7 +846,7 @@ def call_groq(
 
         choices = data.get(
             "choices",
-            []
+            [],
         )
 
         if not choices:
@@ -694,12 +866,24 @@ def call_groq(
             .get("content", "")
         )
 
+        if not content:
+
+            return AIResponse(
+                success=False,
+                provider="groq",
+                model=model,
+                content="",
+                error="Groq returned empty content.",
+                latency_ms=latency,
+            )
+
         return AIResponse(
             success=True,
             provider="groq",
             model=model,
             content=str(content),
             latency_ms=latency,
+            usage=data.get("usage"),
         )
 
     except requests.RequestException as exc:
@@ -725,12 +909,6 @@ def call_ai(
 ) -> AIResponse:
     """
     Unified AI entry point.
-
-    Provider selection:
-        auto → configured provider
-
-    This makes the rest of the application
-    independent from any specific AI company.
     """
 
     provider = (
@@ -751,10 +929,22 @@ def call_ai(
             ),
         )
 
-    last_response = None
+    if provider not in SUPPORTED_PROVIDERS:
+
+        return AIResponse(
+            success=False,
+            provider=provider,
+            model=model or "",
+            content="",
+            error=(
+                f"Unsupported AI provider: {provider}"
+            ),
+        )
+
+    last_response: Optional[AIResponse] = None
 
     for attempt in range(
-        retries + 1
+        max(0, retries) + 1
     ):
 
         if provider == "gemini":
@@ -771,24 +961,11 @@ def call_ai(
                 model=model,
             )
 
-        elif provider == "groq":
+        else:
 
             response = call_groq(
                 prompt,
                 model=model,
-            )
-
-        else:
-
-            return AIResponse(
-                success=False,
-                provider=provider,
-                model=model or "",
-                content="",
-                error=(
-                    f"Unsupported AI provider: "
-                    f"{provider}"
-                ),
             )
 
         last_response = response
@@ -797,122 +974,114 @@ def call_ai(
             return response
 
         if attempt < retries:
+
             time.sleep(
                 1.5 * (attempt + 1)
             )
 
-    return last_response
+    return last_response or AIResponse(
+        success=False,
+        provider=provider,
+        model=model or get_model(provider),
+        content="",
+        error="Unknown AI error.",
+    )
 
 
 # ============================================================
-# Research Agent Prompts
+# Research Agents
 # ============================================================
 
 AGENT_PROMPTS = {
 
     "value": """
-Act as the Value Research Agent.
+You are the VALUE RESEARCH AGENT.
 
-Analyze the company through a long-term value-investing lens.
+Analyze the company from a long-term value perspective.
 
-Focus on:
-- competitive moat
-- durability of earnings
+Evaluate:
+
+- earnings durability
 - free cash flow
-- capital allocation
 - balance sheet
+- capital allocation
 - valuation
 - margin of safety
-- 3-5 year business quality
+- opportunity cost
+- 3-5 year quality
 
-Return:
-1. Thesis
-2. Positives
-3. Negatives
-4. Key risks
-5. Conclusion
+Do not assume that a high-quality business is automatically
+a good stock purchase at any price.
 """,
 
     "business": """
-Act as the Business Quality Agent.
+You are the BUSINESS QUALITY AGENT.
 
-Analyze the company as if the investor is buying
-the underlying business rather than simply buying
-a ticker symbol.
+Analyze the underlying business.
 
-Focus on:
+Evaluate:
+
 - business model
 - pricing power
-- unit economics
 - customer switching costs
-- management quality
+- network effects
+- competitive moat
+- management
 - shareholder alignment
-- corporate culture
 - capital allocation
-- opportunity cost
+- competitive threats
 
-Return:
-1. Thesis
-2. Positives
-3. Negatives
-4. Key risks
-5. Conclusion
+Focus on whether the business can remain economically strong.
 """,
 
     "first_principles": """
-Act as the First-Principles Growth Agent.
+You are the FIRST-PRINCIPLES AGENT.
 
-Break the business down into fundamental economic
-and technological components.
+Break the business into fundamental economic drivers.
 
-Focus on:
-- raw economic drivers
-- technology
-- cost curves
-- scalability
+Evaluate:
+
 - market size
+- unit economics
+- cost structure
+- technology
+- scalability
 - innovation
-- disruption potential
+- disruption
 - execution constraints
-- long-term growth ceiling
+- growth ceiling
+- long-term industry structure
 
-Return:
-1. Thesis
-2. Positives
-3. Negatives
-4. Key risks
-5. Conclusion
+Do not rely solely on historical growth.
+Ask what must be true for future growth to occur.
 """,
 
     "event": """
-Act as the Event and Market Agent.
+You are the EVENT / MARKET AGENT.
 
-Analyze short- and medium-term market drivers.
+Evaluate short- and medium-term drivers.
 
-Focus on:
-- macroeconomic environment
+Consider:
+
 - interest rates
-- policy
+- macro environment
 - regulation
 - tariffs
-- geopolitical exposure
-- catalysts
+- geopolitics
+- earnings catalysts
+- product launches
 - market sentiment
 - positioning
-- event-driven upside/downside
+- event risks
 
-Return:
-1. Thesis
-2. Positives
-3. Negatives
-4. Key risks
-5. Conclusion
+Only discuss events that are present in the supplied evidence.
+If current news is unavailable, explicitly say so.
 """,
 }
 
 
 # ============================================================
-# Agent Execution
+# Research Agent Runner
 # ============================================================
 
 def run_research_agent(
@@ -932,16 +1101,41 @@ def run_research_agent(
     )
 
     prompt = f"""
-Ticker: {ticker}
+Ticker:
+{ticker}
 
-Research data:
+AVAILABLE EVIDENCE:
 {compact_context}
 
+ANALYTICAL ROLE:
 {AGENT_PROMPTS[agent_name]}
 
-Do not invent missing financial data.
+Return a rigorous research opinion.
 
-Use explicit uncertainty where necessary.
+Required structure:
+
+THESIS:
+...
+
+POSITIVES:
+- ...
+- ...
+- ...
+
+NEGATIVES:
+- ...
+- ...
+- ...
+
+RISKS:
+- ...
+- ...
+- ...
+
+CONCLUSION:
+...
+
+Never invent missing evidence.
 """
 
     response = call_ai(prompt)
@@ -971,6 +1165,64 @@ Use explicit uncertainty where necessary.
 
 
 # ============================================================
+# Contradiction Engine
+# ============================================================
+
+def run_contradiction_check(
+    ticker: str,
+    context: Dict[str, Any],
+    opinions: List[ResearchOpinion],
+) -> AIResponse:
+
+    compact_context = sanitize_context(
+        context
+    )
+
+    research = "\n\n".join(
+        (
+            f"=== {op.agent.upper()} ===\n"
+            f"{op.conclusion}"
+        )
+        for op in opinions
+    )
+
+    prompt = f"""
+Ticker:
+{ticker}
+
+AVAILABLE EVIDENCE:
+{compact_context}
+
+RESEARCH AGENTS:
+{research}
+
+You are the CONTRADICTION DETECTION ENGINE.
+
+Look for conflicts such as:
+
+- strong business + expensive valuation
+- strong momentum + weak fundamentals
+- high growth + deteriorating margins
+- high quality + increasing risk
+- bullish narrative + weak evidence
+- bearish narrative + improving fundamentals
+
+Return:
+
+1. Major contradictions
+2. Which evidence is stronger
+3. What cannot currently be determined
+4. What additional data would resolve the conflict
+5. Whether the contradiction materially changes the investment thesis
+
+Be skeptical.
+Do not force agreement.
+"""
+
+    return call_ai(prompt)
+
+
+# ============================================================
 # Bull / Bear Debate
 # ============================================================
 
@@ -984,45 +1236,49 @@ def run_bull_bear_debate(
         context
     )
 
-    opinion_text = "\n\n".join(
+    research = "\n\n".join(
         (
-            f"[{op.agent.upper()}]\n"
+            f"=== {op.agent.upper()} ===\n"
             f"{op.conclusion}"
         )
         for op in opinions
     )
 
     prompt = f"""
-Ticker: {ticker}
+Ticker:
+{ticker}
 
-Company data:
+AVAILABLE EVIDENCE:
 {compact_context}
 
-Research opinions:
-{opinion_text}
+RESEARCH:
+{research}
 
-Now run a structured Bull vs Bear debate.
+Run an adversarial investment debate.
 
-BULL CASE:
-- strongest reasons to own the company
+BULL CASE
+- strongest reason to own
 - growth drivers
+- competitive advantages
 - valuation upside
 - catalysts
 
-BEAR CASE:
-- strongest reasons not to own it
-- valuation risks
+BEAR CASE
+- strongest reason not to own
+- valuation risk
 - competitive threats
-- macro risks
-- execution risks
+- macro risk
+- execution risk
 
-Then identify:
-- what each side is underestimating
-- what evidence would invalidate the bull case
-- what evidence would invalidate the bear case
-- the most important unknown
+Then answer:
 
-Do not simply average the opinions.
+1. What is the bull case underestimating?
+2. What is the bear case underestimating?
+3. What evidence would invalidate the bull case?
+4. What evidence would invalidate the bear case?
+5. What is the single most important unknown?
+
+Do not average the opinions.
 Challenge them.
 """
 
@@ -1033,11 +1289,188 @@ Challenge them.
 # Investment Committee
 # ============================================================
 
+COMMITTEE_SCHEMA = {
+    "verdict": "STRONG BUY | BUY | WATCH | HOLD | REDUCE | SELL",
+    "confidence": 0,
+    "horizon": "string",
+    "business_quality": 0,
+    "moat": 0,
+    "growth": 0,
+    "valuation": 0,
+    "risk": 0,
+    "thesis": "string",
+    "bull_case": "string",
+    "base_case": "string",
+    "bear_case": "string",
+    "key_catalyst": "string",
+    "key_risk": "string",
+    "invalidation": [],
+    "evidence": [],
+    "uncertainty": [],
+}
+
+
+def _number(
+    value: Any,
+    default: float = 50.0,
+) -> float:
+
+    try:
+        value = float(value)
+    except Exception:
+        value = default
+
+    return max(
+        0.0,
+        min(100.0, value),
+    )
+
+
+def _string(
+    value: Any,
+    default: str = "",
+) -> str:
+
+    if value is None:
+        return default
+
+    return str(value).strip()
+
+
+def _list(
+    value: Any,
+) -> List[str]:
+
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+
+        return [
+            str(item)
+            for item in value
+            if item is not None
+        ]
+
+    return [str(value)]
+
+
+def parse_ai_verdict(
+    ticker: str,
+    content: str,
+) -> AIVerdict:
+
+    data = extract_json(content)
+
+    if not data:
+        return AIVerdict(
+            ticker=ticker.upper(),
+            verdict="WATCH",
+            confidence=35,
+            horizon="Unknown",
+            business_quality=50,
+            moat=50,
+            growth=50,
+            valuation=50,
+            risk=50,
+            thesis=content[:3000],
+            bull_case="Unavailable.",
+            base_case="Unavailable.",
+            bear_case="Unavailable.",
+            key_catalyst="Unavailable.",
+            key_risk="AI output could not be structured.",
+            invalidation=[],
+            evidence=[],
+            uncertainty=[
+                "AI response was not returned as valid JSON."
+            ],
+        )
+
+    verdict = _string(
+        data.get("verdict"),
+        "WATCH",
+    ).upper()
+
+    allowed = {
+        "STRONG BUY",
+        "BUY",
+        "WATCH",
+        "HOLD",
+        "REDUCE",
+        "SELL",
+    }
+
+    if verdict not in allowed:
+        verdict = "WATCH"
+
+    return AIVerdict(
+        ticker=ticker.upper(),
+        verdict=verdict,
+        confidence=_number(
+            data.get("confidence"),
+            50,
+        ),
+        horizon=_string(
+            data.get("horizon"),
+            "Unknown",
+        ),
+        business_quality=_number(
+            data.get("business_quality"),
+        ),
+        moat=_number(
+            data.get("moat"),
+        ),
+        growth=_number(
+            data.get("growth"),
+        ),
+        valuation=_number(
+            data.get("valuation"),
+        ),
+        risk=_number(
+            data.get("risk"),
+        ),
+        thesis=_string(
+            data.get("thesis"),
+            "No thesis provided.",
+        ),
+        bull_case=_string(
+            data.get("bull_case"),
+            "Unavailable.",
+        ),
+        base_case=_string(
+            data.get("base_case"),
+            "Unavailable.",
+        ),
+        bear_case=_string(
+            data.get("bear_case"),
+            "Unavailable.",
+        ),
+        key_catalyst=_string(
+            data.get("key_catalyst"),
+            "Unknown.",
+        ),
+        key_risk=_string(
+            data.get("key_risk"),
+            "Unknown.",
+        ),
+        invalidation=_list(
+            data.get("invalidation")
+        ),
+        evidence=_list(
+            data.get("evidence")
+        ),
+        uncertainty=_list(
+            data.get("uncertainty")
+        ),
+    )
+
+
 def run_investment_committee(
     ticker: str,
     context: Dict[str, Any],
     opinions: List[ResearchOpinion],
     debate: Optional[AIResponse] = None,
+    contradictions: Optional[AIResponse] = None,
 ) -> AIResponse:
 
     compact_context = sanitize_context(
@@ -1058,70 +1491,78 @@ def run_investment_committee(
         else "Bull/Bear debate unavailable."
     )
 
+    contradiction_text = (
+        contradictions.content
+        if contradictions and contradictions.success
+        else "Contradiction analysis unavailable."
+    )
+
+    schema_text = json.dumps(
+        COMMITTEE_SCHEMA,
+        ensure_ascii=False,
+        indent=2,
+    )
+
     prompt = f"""
-You are the Chief Investment Analyst of Simon Stock.
+You are the CHIEF INVESTMENT ANALYST of Simon Stock.
 
 Ticker:
 {ticker}
 
-Data:
+AVAILABLE EVIDENCE:
 {compact_context}
 
-Research:
+RESEARCH:
 {research}
 
-Bull/Bear debate:
+BULL / BEAR DEBATE:
 {debate_text}
 
-Produce the final Investment Committee report.
+CONTRADICTION ANALYSIS:
+{contradiction_text}
 
-Use this structure:
+Your task is to make the final investment-research judgment.
 
-# Executive Verdict
+IMPORTANT:
 
-Give a concise overall assessment.
+The quantitative and fundamental evidence should constrain
+your conclusion.
 
-# Business Quality
+Do not produce a bullish verdict merely because the company
+is famous or has strong historical performance.
 
-Assess the underlying business.
+Do not produce a bearish verdict merely because valuation
+is elevated.
 
-# Competitive Moat
+If evidence is insufficient, choose WATCH.
 
-Explain the strength and durability of the moat.
+Return ONLY valid JSON.
 
-# Growth
+Use exactly this structure:
 
-Explain the main growth engines and limitations.
+{schema_text}
 
-# Valuation
+SCORING
 
-Discuss valuation using available evidence.
-Do not invent a DCF value if required inputs are missing.
+business_quality:
+0-100
 
-# Risk
+moat:
+0-100
 
-List the five most important risks.
+growth:
+0-100
 
-# Bull Case
+valuation:
+0-100
 
-Describe the optimistic scenario.
+risk:
+0-100
 
-# Base Case
+confidence:
+0-100
 
-Describe the most reasonable scenario.
-
-# Bear Case
-
-Describe the downside scenario.
-
-# What Would Change My Mind
-
-Give concrete indicators that should cause
-the thesis to be upgraded or downgraded.
-
-# Decision Framework
-
-Choose one:
+VERDICT OPTIONS:
 
 STRONG BUY
 BUY
@@ -1130,24 +1571,36 @@ HOLD
 REDUCE
 SELL
 
-Then provide:
+The "risk" score means:
 
-- confidence: 0-100
-- time horizon
-- key catalyst
-- key risk
-- valuation zone if defensible
+100 = low risk
+0 = extremely high risk
 
-Important:
-This is research, not a guarantee or personalized
+The valuation score means:
+
+100 = very attractive valuation
+0 = extremely unattractive valuation
+
+The final thesis must explicitly mention
+the most important trade-off.
+
+Evidence must only contain evidence available
+in the supplied context or derived transparently
+from it.
+
+Uncertainty must list important unknowns.
+
+This is research, not guaranteed or personalized
 financial advice.
 """
 
-    return call_ai(prompt)
+    return call_ai(
+        compact_prompt(prompt)
+    )
 
 
 # ============================================================
-# Full AI Research Pipeline
+# Full AI Pipeline
 # ============================================================
 
 def run_full_ai_research(
@@ -1155,35 +1608,40 @@ def run_full_ai_research(
     context: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Execute the complete AI research pipeline.
+    Execute full V13.2 AI research.
 
     Pipeline:
 
         Value
-          ↓
         Business
-          ↓
         First Principles
-          ↓
         Event
-          ↓
-        Bull/Bear
-          ↓
+             ↓
+        Contradiction
+             ↓
+        Bull / Bear
+             ↓
         Investment Committee
     """
 
-    opinions = []
+    symbol = str(
+        ticker
+    ).strip().upper()
 
-    for agent_name in [
+    opinions: List[ResearchOpinion] = []
+
+    agents = [
         "value",
         "business",
         "first_principles",
         "event",
-    ]:
+    ]
+
+    for agent_name in agents:
 
         opinion = run_research_agent(
             agent_name,
-            ticker,
+            symbol,
             context,
         )
 
@@ -1191,30 +1649,158 @@ def run_full_ai_research(
             opinion
         )
 
+    contradictions = run_contradiction_check(
+        symbol,
+        context,
+        opinions,
+    )
+
     debate = run_bull_bear_debate(
-        ticker,
+        symbol,
         context,
         opinions,
     )
 
     committee = run_investment_committee(
-        ticker,
+        symbol,
         context,
         opinions,
         debate,
+        contradictions,
+    )
+
+    verdict = parse_ai_verdict(
+        symbol,
+        committee.content
+        if committee.success
+        else "",
     )
 
     return {
-        "ticker": ticker.upper(),
+        "ticker": symbol,
         "provider": detect_provider(),
         "model": get_model(),
         "agents": [
             opinion.to_dict()
             for opinion in opinions
         ],
+        "contradictions": contradictions.to_dict(),
         "debate": debate.to_dict(),
         "committee": committee.to_dict(),
+        "verdict": verdict.to_dict(),
     }
+
+
+# ============================================================
+# Lightweight AI Analysis
+# ============================================================
+
+def run_quick_ai_analysis(
+    ticker: str,
+    context: Dict[str, Any],
+) -> AIResponse:
+    """
+    Lightweight single-call analysis.
+
+    Useful for:
+    - mobile UI
+    - quick stock search
+    - watchlist scanning
+    - daily market dashboard
+    """
+
+    compact_context = sanitize_context(
+        context,
+        max_chars=12000,
+    )
+
+    prompt = f"""
+Analyze {ticker} using the supplied evidence.
+
+Give:
+
+1. One-sentence verdict
+2. Three strongest positives
+3. Three biggest risks
+4. Valuation assessment
+5. Short-term momentum assessment
+6. Long-term business assessment
+7. One thing that could change the thesis
+
+Do not invent data.
+
+Evidence:
+{compact_context}
+"""
+
+    return call_ai(
+        prompt
+    )
+
+
+# ============================================================
+# Provider Fallback
+# ============================================================
+
+def call_ai_with_fallback(
+    prompt: str,
+    preferred_provider: Optional[str] = None,
+    retries: int = 1,
+) -> AIResponse:
+    """
+    Try preferred provider first.
+
+    If it fails, automatically try the remaining
+    configured providers.
+    """
+
+    providers: List[str] = []
+
+    if preferred_provider in SUPPORTED_PROVIDERS:
+        providers.append(
+            preferred_provider
+        )
+
+    detected = detect_provider()
+
+    if detected in SUPPORTED_PROVIDERS:
+        providers.append(
+            detected
+        )
+
+    for provider in [
+        "gemini",
+        "openrouter",
+        "groq",
+    ]:
+        if provider not in providers:
+            providers.append(provider)
+
+    last_response: Optional[AIResponse] = None
+
+    for provider in providers:
+
+        if not get_api_key(provider):
+            continue
+
+        response = call_ai(
+            prompt,
+            provider=provider,
+            retries=retries,
+        )
+
+        last_response = response
+
+        if response.success:
+            return response
+
+    return last_response or AIResponse(
+        success=False,
+        provider="none",
+        model="",
+        content="",
+        error="No configured AI provider succeeded.",
+    )
 
 
 # ============================================================
@@ -1223,22 +1809,68 @@ def run_full_ai_research(
 
 def ai_health_check() -> Dict[str, Any]:
     """
-    Return AI configuration status.
+    Configuration health check.
 
     Does not consume API credits.
     """
 
-    provider = detect_provider()
-    model = get_model(provider)
+    configured = []
+
+    for provider in [
+        "gemini",
+        "openrouter",
+        "groq",
+    ]:
+
+        if get_api_key(provider):
+
+            configured.append({
+                "provider": provider,
+                "model": get_model(provider),
+            })
+
+    primary = detect_provider()
 
     return {
-        "configured": provider != "none",
-        "provider": provider,
-        "model": model,
+        "configured": bool(configured),
+        "provider": primary,
+        "model": get_model(primary),
+        "providers": configured,
         "message": (
             "AI provider configured."
-            if provider != "none"
+            if configured
             else
             "No AI provider configured."
         ),
     }
+
+
+# ============================================================
+# Backward Compatibility
+# ============================================================
+
+def get_ai_status() -> Dict[str, Any]:
+    """
+    Alias kept for future app versions.
+    """
+
+    return ai_health_check()
+
+
+def test_ai_connection() -> AIResponse:
+    """
+    Optional live connection test.
+
+    This DOES consume a small amount of API usage.
+    """
+
+    prompt = """
+Return exactly:
+
+Simon Stock AI connection OK.
+"""
+
+    return call_ai(
+        prompt,
+        retries=1,
+    )
