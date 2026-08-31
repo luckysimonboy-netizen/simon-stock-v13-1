@@ -1,719 +1,748 @@
 from __future__ import annotations
 
+import os
+import json
 import math
 import time
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
-
-# ============================================================
-# OPTIONAL BACKEND IMPORTS
-# ============================================================
-
 try:
-    from data.market import (
-        get_market_bundle,
-        get_quote,
-        get_fundamental_snapshot,
-        get_history,
-        data_health_check,
-    )
-
-    MARKET_BACKEND = True
-
+    import yfinance as yf
 except Exception:
-    MARKET_BACKEND = False
-
-    get_market_bundle = None
-    get_quote = None
-    get_fundamental_snapshot = None
-    get_history = None
-    data_health_check = None
-
-
-try:
-    from ai.orchestrator import (
-        ai_health_check,
-        run_full_ai_research,
-    )
-
-    AI_BACKEND = True
-
-except Exception:
-    AI_BACKEND = False
-
-    ai_health_check = None
-    run_full_ai_research = None
+    yf = None
 
 
 # ============================================================
-# PAGE CONFIG
+# APP CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="SIMON Investment Brain",
+    page_title="Simon Investment Brain",
     page_icon="◈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-# ============================================================
-# SESSION STATE
-# ============================================================
+APP_NAME = "SIMON INVESTMENT BRAIN"
+APP_VERSION = "14.0"
+DEFAULT_TICKER = "AAPL"
 
-DEFAULTS = {
-    "ticker": "NVDA",
-    "period": "1y",
-    "ai_report": None,
-    "research_running": False,
-    "last_refresh": None,
-    "watchlist": [
-        "NVDA",
-        "AAPL",
-        "MSFT",
-        "AMZN",
-        "GOOGL",
-        "META",
-        "TSLA",
-    ],
-    "density": "Comfortable",
-    "theme": "System",
-}
-
-for key, value in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+WATCHLIST = [
+    "AAPL",
+    "NVDA",
+    "MSFT",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "TSLA",
+    "AVGO",
+    "AMD",
+    "NFLX",
+]
 
 
 # ============================================================
-# LIQUID GLASS CSS
+# GLOBAL CSS
 # ============================================================
 
 st.markdown(
     """
 <style>
 
-/* ============================================================
-   ROOT
-   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 :root {
-    --glass-border: rgba(255,255,255,.13);
-    --glass-bg: rgba(255,255,255,.055);
-    --glass-bg-strong: rgba(255,255,255,.085);
-    --muted: rgba(255,255,255,.55);
-    --text: rgba(255,255,255,.94);
-    --blue: #6f8cff;
-    --cyan: #70d7ff;
-    --green: #50d890;
-    --red: #ff667c;
-    --radius: 24px;
+    --bg: #05070b;
+    --panel: rgba(20,24,32,.72);
+    --panel-strong: rgba(24,29,40,.90);
+    --border: rgba(255,255,255,.095);
+    --border-soft: rgba(255,255,255,.055);
+    --text: #f5f7fb;
+    --muted: #8992a3;
+    --blue: #77a7ff;
+    --blue2: #557cff;
+    --green: #45d69a;
+    --red: #ff6375;
+    --yellow: #f4c95d;
+    --purple: #9c8cff;
+    --radius: 22px;
+}
+
+html, body, [class*="css"] {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Display",
+                 "Segoe UI", sans-serif;
 }
 
 .stApp {
     background:
         radial-gradient(
-            circle at 5% 0%,
-            rgba(83,112,255,.17),
+            circle at 78% -10%,
+            rgba(75,120,255,.18),
             transparent 28%
         ),
         radial-gradient(
-            circle at 92% 4%,
-            rgba(75,201,255,.12),
-            transparent 24%
+            circle at 10% 25%,
+            rgba(88,70,255,.09),
+            transparent 25%
         ),
         radial-gradient(
-            circle at 55% 100%,
-            rgba(100,75,255,.08),
-            transparent 30%
+            circle at 85% 80%,
+            rgba(0,190,255,.05),
+            transparent 25%
         ),
-        #080a10;
+        #05070b;
     color: var(--text);
 }
 
-/* ============================================================
-   REMOVE DEFAULT STREAMLIT SPACE
-   ============================================================ */
+/* ---------- hide chrome ---------- */
 
-.block-container {
-    padding-top: 1.25rem;
-    padding-bottom: 2rem;
-    max-width: 1700px;
+#MainMenu {
+    visibility: hidden;
 }
 
-header[data-testid="stHeader"] {
-    background: transparent;
+footer {
+    visibility: hidden;
 }
 
-/* ============================================================
-   SIDEBAR
-   ============================================================ */
+header {
+    background: transparent !important;
+}
+
+/* ---------- sidebar ---------- */
 
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(
             180deg,
-            rgba(16,19,28,.94),
-            rgba(8,10,16,.97)
+            rgba(11,14,21,.97),
+            rgba(5,7,11,.99)
         );
-    border-right: 1px solid rgba(255,255,255,.07);
+    border-right: 1px solid rgba(255,255,255,.06);
 }
 
 section[data-testid="stSidebar"] > div {
     padding-top: 1.5rem;
 }
 
-/* ============================================================
-   GLOBAL BUTTON
-   ============================================================ */
+/* ---------- general ---------- */
 
-.stButton > button {
-    border-radius: 15px;
-    border: 1px solid rgba(255,255,255,.10);
-    background: rgba(255,255,255,.065);
-    color: rgba(255,255,255,.92);
-    transition:
-        transform .18s ease,
-        background .18s ease,
-        border .18s ease;
+.block-container {
+    max-width: 1600px;
+    padding-top: 1.4rem;
+    padding-bottom: 3rem;
 }
 
-.stButton > button:hover {
-    transform: translateY(-1px);
-    background: rgba(255,255,255,.105);
-    border-color: rgba(255,255,255,.20);
-}
-
-.stButton > button[kind="primary"] {
-    background:
-        linear-gradient(
-            135deg,
-            rgba(105,130,255,.90),
-            rgba(87,182,255,.80)
-        );
-    border: 1px solid rgba(255,255,255,.18);
-}
-
-/* ============================================================
-   HEADER
-   ============================================================ */
-
-.sb-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 18px;
-}
-
-.sb-brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-
-.sb-logo {
-    width: 44px;
-    height: 44px;
-    border-radius: 15px;
-
-    display: flex;
-    align-items: center;
-    justify-content: center;
-
-    font-size: 21px;
-    font-weight: 900;
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(120,145,255,.85),
-            rgba(65,201,255,.55)
-        );
-
-    box-shadow:
-        0 10px 35px rgba(78,122,255,.20),
-        inset 0 1px 0 rgba(255,255,255,.35);
-}
-
-.sb-title {
-    font-size: 24px;
-    font-weight: 850;
-    letter-spacing: -1px;
-}
-
-.sb-subtitle {
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 2px;
-}
-
-.sb-status {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-
-    padding: 8px 12px;
-    border-radius: 999px;
-
-    background: rgba(80,216,144,.08);
-    border: 1px solid rgba(80,216,144,.14);
-
-    font-size: 11px;
-    color: rgba(220,255,235,.86);
-}
-
-.sb-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #50d890;
-    box-shadow: 0 0 12px rgba(80,216,144,.8);
-}
-
-/* ============================================================
-   GLASS CARD
-   ============================================================ */
+/* ---------- glass ---------- */
 
 .glass {
-    border-radius: var(--radius);
-
-    border: 1px solid var(--glass-border);
-
     background:
         linear-gradient(
-            135deg,
+            145deg,
             rgba(255,255,255,.075),
             rgba(255,255,255,.025)
         );
-
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     backdrop-filter: blur(30px);
     -webkit-backdrop-filter: blur(30px);
-
     box-shadow:
-        0 18px 60px rgba(0,0,0,.18),
-        inset 0 1px 0 rgba(255,255,255,.055);
-
-    padding: 21px;
-
-    margin-bottom: 15px;
+        0 20px 70px rgba(0,0,0,.24),
+        inset 0 1px 0 rgba(255,255,255,.035);
 }
 
-/* ============================================================
-   HERO
-   ============================================================ */
+.glass-soft {
+    background: rgba(255,255,255,.035);
+    border: 1px solid var(--border-soft);
+    border-radius: 18px;
+}
+
+/* ---------- brand ---------- */
+
+.brand-row {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    margin-bottom: 7px;
+}
+
+.brand-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        linear-gradient(
+            145deg,
+            #78a8ff,
+            #3b64dc
+        );
+    box-shadow:
+        0 12px 35px rgba(73,119,255,.35);
+    font-weight: 800;
+    color: white;
+}
+
+.brand-title {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -1px;
+}
+
+.brand-subtitle {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+
+/* ---------- top bar ---------- */
+
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+}
+
+.topbar-left {
+    color: #aeb6c6;
+    font-size: 12px;
+    letter-spacing: .4px;
+}
+
+.online {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: rgba(56,211,153,.09);
+    border: 1px solid rgba(56,211,153,.18);
+    color: #67e3ae;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #4ce09d;
+    box-shadow: 0 0 13px #4ce09d;
+}
+
+/* ---------- hero ---------- */
 
 .hero {
     position: relative;
     overflow: hidden;
-
+    min-height: 300px;
+    padding: 30px;
     border-radius: 30px;
-
-    border: 1px solid rgba(150,170,255,.16);
-
+    border: 1px solid rgba(255,255,255,.10);
     background:
         radial-gradient(
-            circle at 90% 20%,
-            rgba(83,116,255,.20),
+            circle at 88% 20%,
+            rgba(70,116,255,.25),
             transparent 30%
         ),
+        radial-gradient(
+            circle at 55% 110%,
+            rgba(86,64,255,.12),
+            transparent 35%
+        ),
         linear-gradient(
-            135deg,
-            rgba(255,255,255,.095),
-            rgba(255,255,255,.025)
+            145deg,
+            rgba(28,31,41,.92),
+            rgba(10,12,18,.88)
         );
-
-    padding: 30px;
-
-    margin-bottom: 15px;
-
-    backdrop-filter: blur(35px);
-    -webkit-backdrop-filter: blur(35px);
-
     box-shadow:
-        0 25px 90px rgba(0,0,0,.20),
-        inset 0 1px 0 rgba(255,255,255,.08);
+        0 35px 100px rgba(0,0,0,.34),
+        inset 0 1px 0 rgba(255,255,255,.06);
+    backdrop-filter: blur(35px);
 }
 
 .hero::after {
     content: "";
     position: absolute;
-
-    width: 260px;
-    height: 260px;
-
-    right: -100px;
-    top: -100px;
-
+    width: 280px;
+    height: 280px;
+    right: -120px;
+    top: -120px;
     border-radius: 50%;
+    background: rgba(83,126,255,.12);
+    filter: blur(55px);
+}
 
-    background:
-        radial-gradient(
-            circle,
-            rgba(104,139,255,.20),
-            transparent 70%
-        );
-
-    pointer-events: none;
+.hero-kicker {
+    color: #8e97aa;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
 }
 
 .hero-symbol {
-    font-size: 12px;
-    letter-spacing: 2px;
-    color: rgba(255,255,255,.50);
-    font-weight: 750;
-}
-
-.hero-company {
-    font-size: 31px;
-    font-weight: 850;
-    letter-spacing: -1.3px;
-    margin-top: 4px;
-}
-
-.hero-price {
-    font-size: 47px;
-    font-weight: 900;
-    letter-spacing: -2.5px;
     margin-top: 12px;
-}
-
-.hero-change {
-    display: inline-flex;
-    align-items: center;
-
-    margin-top: 7px;
-
-    padding: 7px 11px;
-
-    border-radius: 999px;
-
-    font-size: 13px;
-    font-weight: 700;
-}
-
-.hero-meta {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 17px;
-}
-
-.meta-pill {
-    padding: 6px 10px;
-    border-radius: 999px;
-
-    background: rgba(255,255,255,.055);
-    border: 1px solid rgba(255,255,255,.075);
-
-    font-size: 11px;
-    color: rgba(255,255,255,.63);
-}
-
-/* ============================================================
-   KPI
-   ============================================================ */
-
-.kpi {
-    min-height: 118px;
-}
-
-.kpi-label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 1.3px;
-    color: rgba(255,255,255,.43);
-}
-
-.kpi-value {
-    font-size: 25px;
+    font-size: 38px;
     font-weight: 850;
-    margin-top: 8px;
-    letter-spacing: -.7px;
-}
-
-.kpi-sub {
-    font-size: 11px;
-    color: rgba(255,255,255,.42);
-    margin-top: 5px;
-}
-
-/* ============================================================
-   SECTION
-   ============================================================ */
-
-.section-title {
-    font-size: 18px;
-    font-weight: 800;
-    letter-spacing: -.4px;
-    margin: 17px 0 10px 1px;
-}
-
-.section-sub {
-    color: rgba(255,255,255,.42);
-    font-size: 11px;
-    margin-top: -7px;
-    margin-bottom: 11px;
-}
-
-/* ============================================================
-   BRAIN
-   ============================================================ */
-
-.brain-card {
-    border-radius: 27px;
-
-    border: 1px solid rgba(121,146,255,.20);
-
-    background:
-        radial-gradient(
-            circle at 15% 0%,
-            rgba(100,126,255,.15),
-            transparent 32%
-        ),
-        linear-gradient(
-            135deg,
-            rgba(91,117,255,.095),
-            rgba(255,255,255,.025)
-        );
-
-    padding: 23px;
-
-    backdrop-filter: blur(32px);
-    -webkit-backdrop-filter: blur(32px);
-
-    box-shadow:
-        0 20px 70px rgba(52,74,180,.13),
-        inset 0 1px 0 rgba(255,255,255,.07);
-}
-
-.brain-label {
-    font-size: 10px;
-    letter-spacing: 1.7px;
-    color: rgba(150,171,255,.72);
-    text-transform: uppercase;
-}
-
-.brain-title {
-    font-size: 23px;
-    font-weight: 850;
-    margin-top: 3px;
-}
-
-.brain-description {
-    font-size: 12px;
-    line-height: 1.65;
-    color: rgba(255,255,255,.55);
-    max-width: 800px;
-    margin-top: 7px;
-}
-
-/* ============================================================
-   SCORE
-   ============================================================ */
-
-.score-box {
-    text-align: center;
-    padding: 15px;
-}
-
-.score-number {
-    font-size: 47px;
-    font-weight: 900;
     letter-spacing: -2px;
 }
 
-.score-caption {
+.hero-name {
+    color: #9ba3b4;
+    margin-top: 3px;
+    font-size: 13px;
+}
+
+.hero-price {
+    margin-top: 27px;
+    font-size: 48px;
+    line-height: 1;
+    font-weight: 850;
+    letter-spacing: -2.7px;
+}
+
+.hero-change-up {
+    color: var(--green);
+}
+
+.hero-change-down {
+    color: var(--red);
+}
+
+.hero-change-flat {
+    color: #a8b0be;
+}
+
+.hero-meta {
+    margin-top: 18px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.pill {
+    padding: 7px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.045);
+    color: #aab2c1;
+    font-size: 11px;
+}
+
+/* ---------- conviction ---------- */
+
+.conviction {
+    height: 100%;
+    padding: 22px;
+    border-radius: 22px;
+    background:
+        radial-gradient(
+            circle at 85% 15%,
+            rgba(102,130,255,.18),
+            transparent 35%
+        ),
+        rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.08);
+}
+
+.conviction-label {
+    color: #8d96a7;
     font-size: 10px;
-    color: rgba(255,255,255,.45);
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+}
+
+.conviction-score {
+    font-size: 50px;
+    line-height: 1;
+    font-weight: 850;
+    margin-top: 14px;
+}
+
+.conviction-bar {
+    height: 7px;
+    background: rgba(255,255,255,.07);
+    border-radius: 999px;
+    margin-top: 18px;
+    overflow: hidden;
+}
+
+.conviction-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(
+        90deg,
+        #527dff,
+        #86a9ff
+    );
+}
+
+.conviction-label-row {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 10px;
+    color: #727b8c;
+}
+
+/* ---------- metric cards ---------- */
+
+.metric-card {
+    padding: 18px;
+    min-height: 108px;
+    border-radius: 19px;
+    background:
+        linear-gradient(
+            145deg,
+            rgba(255,255,255,.055),
+            rgba(255,255,255,.018)
+        );
+    border: 1px solid rgba(255,255,255,.075);
+}
+
+.metric-label {
+    color: #747e90;
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 700;
+}
+
+.metric-value {
+    margin-top: 12px;
+    font-size: 23px;
+    font-weight: 800;
+    letter-spacing: -.7px;
+}
+
+.metric-caption {
+    margin-top: 5px;
+    color: #697282;
+    font-size: 10px;
+}
+
+/* ---------- section ---------- */
+
+.section-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin: 28px 0 12px;
+}
+
+.section-title {
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: -.4px;
+}
+
+.section-subtitle {
+    color: #70798b;
+    font-size: 10px;
+    margin-top: 4px;
+}
+
+/* ---------- brain ---------- */
+
+.brain {
+    padding: 24px;
+    border-radius: 24px;
+    border: 1px solid rgba(119,150,255,.18);
+    background:
+        radial-gradient(
+            circle at 92% 0%,
+            rgba(93,125,255,.18),
+            transparent 28%
+        ),
+        linear-gradient(
+            145deg,
+            rgba(47,56,87,.22),
+            rgba(255,255,255,.025)
+        );
+}
+
+.brain-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.brain-title {
+    font-size: 20px;
+    font-weight: 800;
+}
+
+.brain-status {
+    color: #73dcae;
+    font-size: 10px;
     letter-spacing: 1px;
     text-transform: uppercase;
 }
 
-/* ============================================================
-   AGENT
-   ============================================================ */
-
 .agent {
-    border-radius: 18px;
-    padding: 15px;
-
-    background: rgba(255,255,255,.038);
+    padding: 17px;
+    border-radius: 17px;
+    background: rgba(255,255,255,.035);
     border: 1px solid rgba(255,255,255,.065);
-
-    min-height: 110px;
+    min-height: 150px;
 }
 
 .agent-name {
-    font-size: 10px;
-    letter-spacing: 1px;
-    color: rgba(255,255,255,.45);
+    color: #8791a3;
+    font-size: 9px;
+    letter-spacing: 1.4px;
+    font-weight: 700;
     text-transform: uppercase;
 }
 
 .agent-score {
-    font-size: 25px;
-    font-weight: 850;
-    margin-top: 5px;
+    margin-top: 9px;
+    font-size: 27px;
+    font-weight: 800;
+}
+
+.agent-line {
+    margin-top: 10px;
+    height: 5px;
+    background: rgba(255,255,255,.065);
+    border-radius: 999px;
+}
+
+.agent-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(
+        90deg,
+        #5c7dff,
+        #94aaff
+    );
 }
 
 .agent-note {
+    color: #70798a;
     font-size: 10px;
-    color: rgba(255,255,255,.43);
-    margin-top: 3px;
+    margin-top: 10px;
+    line-height: 1.5;
 }
 
-/* ============================================================
-   WATCHLIST
-   ============================================================ */
+/* ---------- thesis ---------- */
 
-.watch-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-
-    padding: 10px 11px;
-    margin: 5px 0;
-
-    border-radius: 13px;
-
-    background: rgba(255,255,255,.035);
-    border: 1px solid rgba(255,255,255,.05);
+.thesis-card {
+    padding: 23px;
+    border-radius: 22px;
+    background: rgba(255,255,255,.032);
+    border: 1px solid rgba(255,255,255,.065);
 }
 
-.watch-symbol {
+.thesis-title {
+    font-size: 14px;
     font-weight: 800;
+    margin-bottom: 12px;
+}
+
+.thesis-text {
+    color: #a0a8b7;
+    line-height: 1.7;
     font-size: 12px;
 }
 
-.watch-price {
-    font-size: 11px;
-    color: rgba(255,255,255,.54);
-}
+/* ---------- valuation ---------- */
 
-.up {
-    color: var(--green);
-}
-
-.down {
-    color: var(--red);
-}
-
-.neutral {
-    color: rgba(255,255,255,.60);
-}
-
-/* ============================================================
-   SIGNAL
-   ============================================================ */
-
-.signal {
+.scenario {
+    padding: 18px;
     border-radius: 17px;
-    padding: 15px;
-    background: rgba(255,255,255,.04);
-    border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.032);
+    border: 1px solid rgba(255,255,255,.065);
 }
 
-.signal-label {
+.scenario-name {
+    color: #7c8698;
     font-size: 9px;
-    letter-spacing: 1px;
-    color: rgba(255,255,255,.42);
+    letter-spacing: 1.3px;
     text-transform: uppercase;
 }
 
-.signal-value {
-    font-size: 17px;
+.scenario-price {
+    margin-top: 9px;
+    font-size: 25px;
     font-weight: 800;
-    margin-top: 5px;
 }
 
-/* ============================================================
-   RESEARCH
-   ============================================================ */
-
-.research {
-    border-left: 2px solid rgba(111,140,255,.65);
-    padding-left: 15px;
-    line-height: 1.75;
-    color: rgba(255,255,255,.68);
-    font-size: 13px;
+.scenario-up {
+    color: var(--green);
 }
 
-/* ============================================================
-   FOOTER
-   ============================================================ */
+.scenario-down {
+    color: var(--red);
+}
 
-.footer {
-    text-align: center;
-    color: rgba(255,255,255,.25);
-    font-size: 10px;
+.scenario-neutral {
+    color: #c2c9d5;
+}
+
+/* ---------- risk ---------- */
+
+.risk-card {
     padding: 20px;
+    border-radius: 20px;
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.07);
 }
 
-/* ============================================================
-   STREAMLIT TABS
-   ============================================================ */
-
-button[data-baseweb="tab"] {
-    background: transparent !important;
-    border-radius: 13px !important;
-    font-size: 12px !important;
+.risk-value {
+    font-size: 34px;
+    font-weight: 850;
 }
 
-div[data-baseweb="tab-list"] {
-    gap: 5px;
+.risk-low {
+    color: var(--green);
 }
 
-/* ============================================================
-   INPUT
-   ============================================================ */
+.risk-mid {
+    color: var(--yellow);
+}
 
-div[data-baseweb="input"] {
+.risk-high {
+    color: var(--red);
+}
+
+/* ---------- sidebar cards ---------- */
+
+.sidebar-title {
+    color: #6e7788;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.7px;
+    text-transform: uppercase;
+    margin-top: 20px;
+    margin-bottom: 10px;
+}
+
+.watch-button {
+    margin-bottom: 7px;
+}
+
+/* ---------- streamlit widgets ---------- */
+
+div[data-testid="stButton"] > button {
     border-radius: 14px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.045);
+    color: #d9dee8;
+    transition: all .18s ease;
 }
 
-/* ============================================================
-   METRIC
-   ============================================================ */
+div[data-testid="stButton"] > button:hover {
+    border-color: rgba(115,151,255,.45);
+    background: rgba(90,120,255,.11);
+    transform: translateY(-1px);
+}
+
+div[data-testid="stButton"] > button[kind="primary"] {
+    background:
+        linear-gradient(
+            135deg,
+            #5e82ff,
+            #4268e0
+        );
+    border: none;
+    color: white;
+    box-shadow: 0 12px 30px rgba(66,104,224,.25);
+}
+
+div[data-baseweb="select"] > div {
+    background: rgba(255,255,255,.045);
+    border-color: rgba(255,255,255,.08);
+    border-radius: 13px;
+}
+
+div[data-baseweb="input"] > div {
+    background: rgba(255,255,255,.045);
+    border-color: rgba(255,255,255,.08);
+    border-radius: 13px;
+}
+
+.stTextInput input {
+    color: white;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+    background: transparent;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 42px;
+    padding: 0 16px;
+    border-radius: 12px;
+    color: #727b8c;
+}
+
+.stTabs [aria-selected="true"] {
+    background: rgba(255,255,255,.065);
+    color: #f3f5fa !important;
+}
 
 div[data-testid="stMetric"] {
-    background: rgba(255,255,255,.035);
-    border: 1px solid rgba(255,255,255,.06);
-    border-radius: 18px;
-    padding: 14px;
+    background: transparent;
 }
 
-/* ============================================================
-   DATAFRAME
-   ============================================================ */
-
-div[data-testid="stDataFrame"] {
-    border-radius: 18px;
-    overflow: hidden;
+div[data-testid="stMetricValue"] {
+    font-weight: 800;
 }
 
-/* ============================================================
-   MOBILE
-   ============================================================ */
+.stAlert {
+    border-radius: 16px;
+}
 
-@media (max-width: 900px) {
+hr {
+    border-color: rgba(255,255,255,.06);
+}
 
-    .hero-price {
-        font-size: 38px;
-    }
+/* ---------- data source badge ---------- */
 
-    .hero-company {
-        font-size: 25px;
-    }
+.data-badge-live {
+    color: #5de0a4;
+    background: rgba(60,220,150,.08);
+    border: 1px solid rgba(60,220,150,.15);
+}
 
-    .sb-status {
-        display: none;
-    }
+.data-badge-demo {
+    color: #f3c85c;
+    background: rgba(243,200,92,.08);
+    border: 1px solid rgba(243,200,92,.15);
+}
 
+.data-badge {
+    display: inline-block;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* ---------- footer ---------- */
+
+.footer {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid rgba(255,255,255,.06);
+    color: #596273;
+    font-size: 9px;
+    line-height: 1.7;
 }
 
 </style>
@@ -723,129 +752,511 @@ div[data-testid="stDataFrame"] {
 
 
 # ============================================================
-# HELPERS
+# UTILS
 # ============================================================
 
-def safe_float(value: Any) -> Optional[float]:
+def safe_float(value, default=None):
     try:
         if value is None:
-            return None
-
-        result = float(value)
-
-        if math.isnan(result) or math.isinf(result):
-            return None
-
-        return result
-
+            return default
+        value = float(value)
+        if not np.isfinite(value):
+            return default
+        return value
     except Exception:
-        return None
+        return default
 
 
-def fmt_money(value: Any, digits: int = 2) -> str:
+def fmt_money(value, digits=2):
     value = safe_float(value)
-
     if value is None:
         return "—"
-
     return f"${value:,.{digits}f}"
 
 
-def fmt_percent(value: Any, digits: int = 2) -> str:
+def fmt_percent(value, digits=2):
     value = safe_float(value)
+    if value is None:
+        return "—"
+    return f"{value * 100:.{digits}f}%"
 
+
+def fmt_large(value):
+    value = safe_float(value)
     if value is None:
         return "—"
 
-    # Most backend percentages are represented as decimals.
-    if abs(value) <= 2:
-        value *= 100
+    value = abs(value)
 
-    return f"{value:.{digits}f}%"
+    if value >= 1e12:
+        return f"${value / 1e12:.2f}T"
 
+    if value >= 1e9:
+        return f"${value / 1e9:.2f}B"
 
-def fmt_number(value: Any) -> str:
-    value = safe_float(value)
+    if value >= 1e6:
+        return f"${value / 1e6:.2f}M"
 
-    if value is None:
-        return "—"
-
-    absolute = abs(value)
-
-    if absolute >= 1e12:
-        return f"{value / 1e12:.2f}T"
-
-    if absolute >= 1e9:
-        return f"{value / 1e9:.2f}B"
-
-    if absolute >= 1e6:
-        return f"{value / 1e6:.2f}M"
-
-    if absolute >= 1e3:
-        return f"{value / 1e3:.2f}K"
-
-    return f"{value:,.0f}"
+    return f"${value:,.0f}"
 
 
-def get_value(data: Dict, *keys, default=None):
-    if not isinstance(data, dict):
-        return default
+def clamp(value, low=0, high=100):
+    return max(low, min(high, float(value)))
 
-    for key in keys:
-        value = data.get(key)
 
-        if value is not None:
+def score_class(score):
+    score = safe_float(score, 50)
+    if score >= 70:
+        return "risk-low"
+    if score >= 45:
+        return "risk-mid"
+    return "risk-high"
+
+
+def get_secret(name, default=None):
+    try:
+        value = st.secrets.get(name)
+        if value:
             return value
+    except Exception:
+        pass
 
-    return default
-
-
-def safe_dict(value):
-    return value if isinstance(value, dict) else {}
+    return os.getenv(name, default)
 
 
-def calculate_technicals(df: pd.DataFrame) -> pd.DataFrame:
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-    if df is None or df.empty:
-        return pd.DataFrame()
+if "ticker" not in st.session_state:
+    st.session_state.ticker = DEFAULT_TICKER
+
+if "research" not in st.session_state:
+    st.session_state.research = None
+
+if "last_loaded" not in st.session_state:
+    st.session_state.last_loaded = None
+
+
+# ============================================================
+# DEMO DATA FALLBACK
+# ============================================================
+
+def demo_profile(ticker: str) -> Dict[str, Any]:
+
+    profiles = {
+        "AAPL": {
+            "name": "Apple Inc.",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "market_cap": 3.45e12,
+            "pe": 31.2,
+            "forward_pe": 28.5,
+            "price_to_book": 49.2,
+            "revenue_growth": 0.074,
+            "earnings_growth": 0.116,
+            "gross_margin": 0.466,
+            "operating_margin": 0.315,
+            "roe": 1.56,
+            "debt_to_equity": 1.52,
+            "free_cash_flow": 1.08e11,
+            "cash": 6.7e10,
+            "debt": 1.2e11,
+        },
+        "NVDA": {
+            "name": "NVIDIA Corporation",
+            "sector": "Technology",
+            "industry": "Semiconductors",
+            "market_cap": 4.0e12,
+            "pe": 47.0,
+            "forward_pe": 32.0,
+            "price_to_book": 35.0,
+            "revenue_growth": 0.55,
+            "earnings_growth": 0.65,
+            "gross_margin": 0.73,
+            "operating_margin": 0.62,
+            "roe": 1.05,
+            "debt_to_equity": 0.18,
+            "free_cash_flow": 6.0e10,
+            "cash": 4.2e10,
+            "debt": 1.1e10,
+        },
+        "MSFT": {
+            "name": "Microsoft Corporation",
+            "sector": "Technology",
+            "industry": "Software",
+            "market_cap": 3.8e12,
+            "pe": 36.0,
+            "forward_pe": 30.0,
+            "price_to_book": 12.0,
+            "revenue_growth": 0.14,
+            "earnings_growth": 0.16,
+            "gross_margin": 0.69,
+            "operating_margin": 0.45,
+            "roe": 0.34,
+            "debt_to_equity": 0.32,
+            "free_cash_flow": 7.0e10,
+            "cash": 7.8e10,
+            "debt": 7.2e10,
+        },
+    }
+
+    base = profiles.get(
+        ticker,
+        {
+            "name": ticker,
+            "sector": "Technology",
+            "industry": "Technology",
+            "market_cap": 8e11,
+            "pe": 27,
+            "forward_pe": 24,
+            "price_to_book": 7,
+            "revenue_growth": .12,
+            "earnings_growth": .14,
+            "gross_margin": .55,
+            "operating_margin": .25,
+            "roe": .30,
+            "debt_to_equity": .45,
+            "free_cash_flow": 2e10,
+            "cash": 3e10,
+            "debt": 2e10,
+        },
+    )
+
+    return base
+
+
+def demo_history(ticker: str, days: int = 420) -> pd.DataFrame:
+
+    seed = sum(ord(c) for c in ticker)
+    rng = np.random.default_rng(seed)
+
+    profile = demo_profile(ticker)
+
+    if ticker == "NVDA":
+        start = 140
+        drift = 0.0012
+    elif ticker == "MSFT":
+        start = 420
+        drift = 0.00045
+    elif ticker == "AAPL":
+        start = 185
+        drift = 0.00035
+    else:
+        start = 100
+        drift = 0.00025
+
+    dates = pd.bdate_range(
+        end=pd.Timestamp.today(),
+        periods=days,
+    )
+
+    returns = rng.normal(
+        loc=drift,
+        scale=.018,
+        size=len(dates),
+    )
+
+    prices = start * np.exp(
+        np.cumsum(returns)
+    )
+
+    volume = rng.integers(
+        10_000_000,
+        80_000_000,
+        len(dates),
+    )
+
+    df = pd.DataFrame(
+        {
+            "Open": prices * (
+                1 + rng.normal(0, .006, len(prices))
+            ),
+            "High": prices * (
+                1 + abs(rng.normal(0, .012, len(prices)))
+            ),
+            "Low": prices * (
+                1 - abs(rng.normal(0, .012, len(prices)))
+            ),
+            "Close": prices,
+            "Adj Close": prices,
+            "Volume": volume,
+        },
+        index=dates,
+    )
+
+    return df
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_history(
+    ticker: str,
+    period: str = "1y",
+) -> Tuple[pd.DataFrame, str, Optional[str]]:
+
+    if yf is None:
+        return (
+            demo_history(ticker),
+            "DEMO",
+            "yfinance is not installed",
+        )
+
+    try:
+        t = yf.Ticker(ticker)
+
+        df = t.history(
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+        )
+
+        if df is None or df.empty:
+            raise RuntimeError(
+                "Yahoo Finance returned no history."
+            )
+
+        df = df.copy()
+
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+        df = df[
+            [
+                c for c in [
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Adj Close",
+                    "Volume",
+                ]
+                if c in df.columns
+            ]
+        ]
+
+        df = df.dropna(
+            subset=["Close"]
+        )
+
+        if len(df) < 30:
+            raise RuntimeError(
+                "Not enough market history."
+            )
+
+        return df, "LIVE", None
+
+    except Exception as exc:
+
+        return (
+            demo_history(ticker),
+            "DEMO",
+            str(exc),
+        )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_profile(
+    ticker: str,
+) -> Tuple[Dict[str, Any], str, Optional[str]]:
+
+    fallback = demo_profile(ticker)
+
+    if yf is None:
+        return fallback, "DEMO", "yfinance unavailable"
+
+    try:
+
+        t = yf.Ticker(ticker)
+
+        info = {}
+
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+
+        if not info:
+            return fallback, "DEMO", "No fundamental profile returned"
+
+        result = {
+            "name": info.get(
+                "longName"
+            ) or info.get(
+                "shortName"
+            ) or ticker,
+
+            "sector": info.get(
+                "sector"
+            ),
+
+            "industry": info.get(
+                "industry"
+            ),
+
+            "market_cap": info.get(
+                "marketCap"
+            ),
+
+            "pe": info.get(
+                "trailingPE"
+            ),
+
+            "forward_pe": info.get(
+                "forwardPE"
+            ),
+
+            "price_to_book": info.get(
+                "priceToBook"
+            ),
+
+            "revenue_growth": info.get(
+                "revenueGrowth"
+            ),
+
+            "earnings_growth": info.get(
+                "earningsGrowth"
+            ),
+
+            "gross_margin": info.get(
+                "grossMargins"
+            ),
+
+            "operating_margin": info.get(
+                "operatingMargins"
+            ),
+
+            "roe": info.get(
+                "returnOnEquity"
+            ),
+
+            "debt_to_equity": info.get(
+                "debtToEquity"
+            ),
+
+            "free_cash_flow": info.get(
+                "freeCashflow"
+            ),
+
+            "cash": info.get(
+                "totalCash"
+            ),
+
+            "debt": info.get(
+                "totalDebt"
+            ),
+
+            "website": info.get(
+                "website"
+            ),
+
+            "country": info.get(
+                "country"
+            ),
+
+            "beta": info.get(
+                "beta"
+            ),
+
+            "dividend_yield": info.get(
+                "dividendYield"
+            ),
+        }
+
+        # If essentially everything failed, fallback.
+        useful = [
+            result.get("market_cap"),
+            result.get("pe"),
+            result.get("revenue_growth"),
+            result.get("roe"),
+        ]
+
+        if not any(v is not None for v in useful):
+            return fallback, "DEMO", "Incomplete fundamental response"
+
+        for key, value in fallback.items():
+
+            if result.get(key) is None:
+                result[key] = value
+
+        return result, "LIVE", None
+
+    except Exception as exc:
+
+        return fallback, "DEMO", str(exc)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_quote(
+    ticker: str,
+    history: pd.DataFrame,
+) -> Dict[str, Any]:
+
+    last_price = safe_float(
+        history["Close"].iloc[-1]
+    )
+
+    previous = safe_float(
+        history["Close"].iloc[-2]
+    )
+
+    change = (
+        last_price - previous
+        if last_price is not None
+        and previous is not None
+        else None
+    )
+
+    change_pct = (
+        change / previous
+        if change is not None
+        and previous
+        else None
+    )
+
+    volume = None
+
+    if "Volume" in history.columns:
+        volume = safe_float(
+            history["Volume"].iloc[-1]
+        )
+
+    return {
+        "price": last_price,
+        "previous_close": previous,
+        "change": change,
+        "change_percent": change_pct,
+        "volume": volume,
+    }
+
+
+# ============================================================
+# TECHNICAL ENGINE
+# ============================================================
+
+def calculate_technicals(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
 
     data = df.copy()
 
-    # Normalize columns
-    rename_map = {}
+    close = data["Close"]
 
-    for col in data.columns:
+    data["SMA20"] = close.rolling(
+        20
+    ).mean()
 
-        normalized = str(col).lower()
+    data["SMA50"] = close.rolling(
+        50
+    ).mean()
 
-        if normalized == "close":
-            rename_map[col] = "Close"
-
-        elif normalized == "open":
-            rename_map[col] = "Open"
-
-        elif normalized == "high":
-            rename_map[col] = "High"
-
-        elif normalized == "low":
-            rename_map[col] = "Low"
-
-        elif normalized == "volume":
-            rename_map[col] = "Volume"
-
-    data = data.rename(columns=rename_map)
-
-    if "Close" not in data.columns:
-        return data
-
-    close = pd.to_numeric(
-        data["Close"],
-        errors="coerce",
-    )
-
-    data["SMA20"] = close.rolling(20).mean()
-    data["SMA50"] = close.rolling(50).mean()
-    data["SMA200"] = close.rolling(200).mean()
+    data["SMA200"] = close.rolling(
+        200
+    ).mean()
 
     data["EMA12"] = close.ewm(
         span=12,
@@ -858,8 +1269,8 @@ def calculate_technicals(df: pd.DataFrame) -> pd.DataFrame:
     ).mean()
 
     data["MACD"] = (
-        data["EMA12"] -
-        data["EMA26"]
+        data["EMA12"]
+        - data["EMA26"]
     )
 
     data["MACD_SIGNAL"] = (
@@ -873,46 +1284,60 @@ def calculate_technicals(df: pd.DataFrame) -> pd.DataFrame:
 
     delta = close.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-
-    rs = avg_gain / avg_loss.replace(
-        0,
-        np.nan,
+    gain = delta.clip(
+        lower=0
     )
 
-    data["RSI"] = 100 - (
-        100 / (1 + rs)
+    loss = -delta.clip(
+        upper=0
     )
 
-    if "Volume" in data.columns:
+    avg_gain = gain.rolling(
+        14
+    ).mean()
 
-        volume = pd.to_numeric(
-            data["Volume"],
-            errors="coerce",
-        )
+    avg_loss = loss.rolling(
+        14
+    ).mean()
 
-        data["Volume_MA20"] = (
-            volume.rolling(20).mean()
+    rs = (
+        avg_gain
+        / avg_loss.replace(
+            0,
+            np.nan,
         )
+    )
+
+    data["RSI"] = (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
+    )
+
+    data["VOL20"] = (
+        data["Volume"]
+        .rolling(20)
+        .mean()
+        if "Volume" in data.columns
+        else np.nan
+    )
+
+    data["ATR14"] = (
+        data["High"]
+        - data["Low"]
+    ).rolling(14).mean()
 
     return data
 
 
-def technical_summary(df):
+def technical_snapshot(
+    df: pd.DataFrame,
+) -> Dict[str, Any]:
 
-    if df is None or df.empty:
-        return {
-            "trend": "UNKNOWN",
-            "momentum": "UNKNOWN",
-            "rsi": None,
-            "sma20": None,
-            "sma50": None,
-            "sma200": None,
-        }
+    if df.empty:
+        return {}
 
     latest = df.iloc[-1]
 
@@ -934,6 +1359,14 @@ def technical_summary(df):
 
     rsi = safe_float(
         latest.get("RSI")
+    )
+
+    macd = safe_float(
+        latest.get("MACD")
+    )
+
+    macd_signal = safe_float(
+        latest.get("MACD_SIGNAL")
     )
 
     trend = "NEUTRAL"
@@ -966,346 +1399,621 @@ def technical_summary(df):
         elif rsi <= 45:
             momentum = "NEGATIVE"
 
+    macd_state = "NEUTRAL"
+
+    if (
+        macd is not None
+        and macd_signal is not None
+    ):
+
+        if macd > macd_signal:
+            macd_state = "POSITIVE"
+        else:
+            macd_state = "NEGATIVE"
+
+    returns = df["Close"].pct_change()
+
+    volatility = safe_float(
+        returns.tail(30).std()
+    )
+
     return {
-        "trend": trend,
-        "momentum": momentum,
-        "rsi": rsi,
+        "price": price,
         "sma20": sma20,
         "sma50": sma50,
         "sma200": sma200,
+        "rsi": rsi,
+        "macd": macd,
+        "macd_signal": macd_signal,
+        "trend": trend,
+        "momentum": momentum,
+        "macd_state": macd_state,
+        "volatility_30d": volatility,
     }
 
 
-def calculate_brain_scores(
-    fundamentals: Dict,
-    technicals: Dict,
-):
+# ============================================================
+# FUNDAMENTAL ENGINE
+# ============================================================
 
-    f = safe_dict(fundamentals)
+def fundamental_scores(
+    fundamentals: Dict[str, Any],
+) -> Dict[str, float]:
 
     revenue_growth = safe_float(
-        get_value(
-            f,
-            "revenue_growth",
-            "revenueGrowth",
-        )
+        fundamentals.get("revenue_growth"),
+        .08,
     )
 
     earnings_growth = safe_float(
-        get_value(
-            f,
-            "earnings_growth",
-            "earningsGrowth",
-        )
+        fundamentals.get("earnings_growth"),
+        .08,
+    )
+
+    gross_margin = safe_float(
+        fundamentals.get("gross_margin"),
+        .35,
+    )
+
+    operating_margin = safe_float(
+        fundamentals.get("operating_margin"),
+        .15,
     )
 
     roe = safe_float(
-        get_value(
-            f,
-            "roe",
-            "return_on_equity",
-        )
-    )
-
-    margin = safe_float(
-        get_value(
-            f,
-            "operating_margin",
-            "operatingMargin",
-        )
-    )
-
-    pe = safe_float(
-        get_value(
-            f,
-            "pe",
-            "trailing_pe",
-        )
+        fundamentals.get("roe"),
+        .15,
     )
 
     debt = safe_float(
-        get_value(
-            f,
-            "debt_to_equity",
-            "debtToEquity",
-        )
+        fundamentals.get("debt_to_equity"),
+        70,
     )
 
-    # Normalize
-    if revenue_growth is not None and abs(revenue_growth) <= 2:
-        revenue_growth *= 100
-
-    if earnings_growth is not None and abs(earnings_growth) <= 2:
-        earnings_growth *= 100
-
-    if roe is not None and abs(roe) <= 2:
-        roe *= 100
-
-    if margin is not None and abs(margin) <= 2:
-        margin *= 100
-
-    # QUALITY
-    quality = 55
-
-    if roe is not None:
-        quality += min(max(roe / 3, -15), 20)
-
-    if margin is not None:
-        quality += min(max(margin / 2, -10), 15)
-
-    quality = max(0, min(100, quality))
-
-    # GROWTH
-    growth = 50
-
-    if revenue_growth is not None:
-        growth += min(max(revenue_growth * 0.6, -25), 30)
-
-    if earnings_growth is not None:
-        growth += min(max(earnings_growth * 0.4, -20), 25)
-
-    growth = max(0, min(100, growth))
-
-    # VALUATION
-    valuation = 55
-
-    if pe is not None:
-
-        if pe < 15:
-            valuation += 25
-
-        elif pe < 22:
-            valuation += 12
-
-        elif pe < 30:
-            valuation += 2
-
-        elif pe < 45:
-            valuation -= 10
-
-        else:
-            valuation -= 20
-
-    valuation = max(0, min(100, valuation))
-
-    # MOMENTUM
-    momentum = 50
-
-    if technicals.get("trend") == "BULLISH":
-        momentum += 28
-
-    elif technicals.get("trend") == "BEARISH":
-        momentum -= 28
-
-    if technicals.get("momentum") == "POSITIVE":
-        momentum += 12
-
-    elif technicals.get("momentum") == "NEGATIVE":
-        momentum -= 12
-
-    elif technicals.get("momentum") == "OVERBOUGHT":
-        momentum += 5
-
-    elif technicals.get("momentum") == "OVERSOLD":
-        momentum -= 3
-
-    momentum = max(0, min(100, momentum))
-
-    # MOAT
-    moat = (
-        quality * 0.55
-        + growth * 0.30
-        + valuation * 0.15
+    pe = safe_float(
+        fundamentals.get("pe"),
+        25,
     )
 
-    moat = max(0, min(100, moat))
-
-    # RISK
-    risk = 40
-
-    if debt is not None:
-
-        if debt > 200:
-            risk += 30
-
-        elif debt > 120:
-            risk += 18
-
-        elif debt > 60:
-            risk += 8
-
-        elif debt < 30:
-            risk -= 8
-
-    if technicals.get("trend") == "BEARISH":
-        risk += 15
-
-    if technicals.get("momentum") == "OVERBOUGHT":
-        risk += 8
-
-    risk = max(0, min(100, risk))
-
-    conviction = (
-        quality * 0.22
-        + moat * 0.20
-        + growth * 0.22
-        + valuation * 0.16
-        + momentum * 0.20
-        - risk * 0.08
+    # Growth
+    growth = clamp(
+        50
+        + revenue_growth * 180
+        + earnings_growth * 100
     )
 
-    conviction = max(0, min(100, conviction))
+    # Quality
+    quality = clamp(
+        35
+        + gross_margin * 40
+        + operating_margin * 55
+        + min(roe, 1.0) * 25
+    )
+
+    # Balance sheet
+    balance = clamp(
+        90
+        - min(debt, 300) * .18
+    )
+
+    # Valuation
+    valuation = clamp(
+        90
+        - max(pe - 15, 0) * 2.3
+    )
 
     return {
-        "quality": round(quality),
-        "moat": round(moat),
-        "growth": round(growth),
-        "valuation": round(valuation),
-        "momentum": round(momentum),
-        "risk": round(risk),
-        "conviction": round(conviction),
+        "growth": growth,
+        "quality": quality,
+        "balance": balance,
+        "valuation": valuation,
     }
 
 
 # ============================================================
-# FALLBACK DATA
+# INVESTMENT BRAIN
 # ============================================================
 
-def fallback_quote(ticker):
-
-    return {
-        "price": None,
-        "change": None,
-        "change_percent": None,
-        "volume": None,
-    }
-
-
-def fallback_fundamentals(ticker):
-
-    return {
-        "name": ticker,
-        "sector": "—",
-        "industry": "—",
-        "country": "—",
-        "market_cap": None,
-        "pe": None,
-        "forward_pe": None,
-        "price_to_book": None,
-        "ev_to_ebitda": None,
-        "revenue_growth": None,
-        "earnings_growth": None,
-        "gross_margin": None,
-        "operating_margin": None,
-        "roe": None,
-        "total_cash": None,
-        "total_debt": None,
-        "current_ratio": None,
-        "debt_to_equity": None,
-        "free_cash_flow": None,
-        "website": None,
-    }
-
-
-# ============================================================
-# LOAD MARKET DATA SAFELY
-# ============================================================
-
-@st.cache_data(
-    ttl=60,
-    show_spinner=False,
-)
-def load_market_data(
+def compute_brain(
     ticker: str,
-    period: str,
-):
+    fundamentals: Dict[str, Any],
+    technicals: Dict[str, Any],
+) -> Dict[str, Any]:
 
-    result = {
-        "history": pd.DataFrame(),
-        "quote": fallback_quote(ticker),
-        "fundamentals": fallback_fundamentals(ticker),
-        "error": None,
+    fs = fundamental_scores(
+        fundamentals
+    )
+
+    momentum_score = 50
+
+    trend = technicals.get(
+        "trend"
+    )
+
+    momentum = technicals.get(
+        "momentum"
+    )
+
+    rsi = safe_float(
+        technicals.get("rsi")
+    )
+
+    if trend == "BULLISH":
+        momentum_score += 22
+    elif trend == "BEARISH":
+        momentum_score -= 22
+
+    if momentum == "POSITIVE":
+        momentum_score += 12
+    elif momentum == "NEGATIVE":
+        momentum_score -= 12
+    elif momentum == "OVERBOUGHT":
+        momentum_score += 5
+    elif momentum == "OVERSOLD":
+        momentum_score -= 2
+
+    if rsi is not None:
+
+        if rsi > 75:
+            momentum_score -= 8
+
+        elif rsi < 25:
+            momentum_score += 6
+
+    momentum_score = clamp(
+        momentum_score
+    )
+
+    # AI-style investment conviction
+    conviction = (
+        fs["valuation"] * .20
+        + fs["quality"] * .24
+        + fs["growth"] * .22
+        + momentum_score * .18
+        + fs["balance"] * .16
+    )
+
+    conviction = clamp(
+        conviction
+    )
+
+    # Risk
+    risk = (
+        100
+        - (
+            fs["quality"] * .30
+            + fs["balance"] * .25
+            + fs["valuation"] * .20
+            + momentum_score * .25
+        )
+    )
+
+    risk = clamp(
+        risk
+    )
+
+    # Decision
+    if conviction >= 78:
+        decision = "ACCUMULATE"
+    elif conviction >= 66:
+        decision = "WATCH / BUILD"
+    elif conviction >= 52:
+        decision = "HOLD / WAIT"
+    else:
+        decision = "AVOID / REDUCE"
+
+    return {
+        "valuation": round(
+            fs["valuation"]
+        ),
+        "quality": round(
+            fs["quality"]
+        ),
+        "growth": round(
+            fs["growth"]
+        ),
+        "momentum": round(
+            momentum_score
+        ),
+        "balance": round(
+            fs["balance"]
+        ),
+        "conviction": round(
+            conviction
+        ),
+        "risk": round(
+            risk
+        ),
+        "decision": decision,
     }
 
-    if not MARKET_BACKEND:
 
-        result["error"] = (
-            "Market backend unavailable. "
-            "Check data.market."
+# ============================================================
+# VALUATION ENGINE
+# ============================================================
+
+def valuation_scenarios(
+    price: Optional[float],
+    fundamentals: Dict[str, Any],
+) -> Dict[str, float]:
+
+    price = safe_float(
+        price,
+        100,
+    )
+
+    growth = safe_float(
+        fundamentals.get(
+            "revenue_growth"
+        ),
+        .10,
+    )
+
+    earnings_growth = safe_float(
+        fundamentals.get(
+            "earnings_growth"
+        ),
+        .10,
+    )
+
+    pe = safe_float(
+        fundamentals.get(
+            "pe"
+        ),
+        25,
+    )
+
+    # Simplified scenario framework.
+    # This is not a production DCF.
+    growth_factor = (
+        1
+        + min(
+            max(
+                growth,
+                -.20,
+            ),
+            .60,
+        )
+    )
+
+    earnings_factor = (
+        1
+        + min(
+            max(
+                earnings_growth,
+                -.30,
+            ),
+            .70,
+        )
+    )
+
+    quality_factor = (
+        min(
+            max(
+                pe / 25,
+                .65,
+            ),
+            1.6,
+        )
+    )
+
+    base = price * (
+        .55 * growth_factor
+        + .45 * earnings_factor
+    ) * (
+        1 / max(
+            quality_factor ** .12,
+            .85,
+        )
+    )
+
+    bull = base * 1.18
+    bear = base * .72
+
+    return {
+        "bear": bear,
+        "base": base,
+        "bull": bull,
+    }
+
+
+# ============================================================
+# AI LAYER
+# ============================================================
+
+def ai_config() -> Dict[str, Any]:
+
+    key = get_secret(
+        "OPENAI_API_KEY"
+    )
+
+    model = get_secret(
+        "OPENAI_MODEL",
+        "gpt-4o-mini",
+    )
+
+    base_url = get_secret(
+        "OPENAI_BASE_URL",
+        "https://api.openai.com/v1",
+    )
+
+    return {
+        "configured": bool(key),
+        "api_key": key,
+        "model": model,
+        "base_url": base_url.rstrip("/"),
+    }
+
+
+def local_ai_memo(
+    ticker: str,
+    fundamentals: Dict[str, Any],
+    technicals: Dict[str, Any],
+    brain: Dict[str, Any],
+    scenarios: Dict[str, float],
+) -> Dict[str, str]:
+
+    growth = brain["growth"]
+    quality = brain["quality"]
+    valuation = brain["valuation"]
+    momentum = brain["momentum"]
+    risk = brain["risk"]
+
+    decision = brain["decision"]
+
+    trend = technicals.get(
+        "trend",
+        "NEUTRAL",
+    )
+
+    revenue_growth = fmt_percent(
+        fundamentals.get(
+            "revenue_growth"
+        )
+    )
+
+    pe = fundamentals.get(
+        "pe"
+    )
+
+    if growth >= 75:
+        growth_comment = (
+            f"{ticker} 当前增长质量较强，"
+            f"收入增长约 {revenue_growth}，"
+            "市场仍可能给予成长溢价。"
+        )
+    elif growth >= 55:
+        growth_comment = (
+            f"{ticker} 增长处于中等偏上水平，"
+            "核心变量是未来盈利增速能否继续兑现。"
+        )
+    else:
+        growth_comment = (
+            f"{ticker} 当前增长并不突出，"
+            "后续估值扩张需要更强的基本面催化。"
         )
 
-        return result
+    if quality >= 78:
+        quality_comment = (
+            "商业质量较强，利润率、资本效率或现金流能力"
+            "构成主要护城河。"
+        )
+    elif quality >= 60:
+        quality_comment = (
+            "商业质量处于中上水平，但仍需要观察"
+            "利润率与资本回报能否持续。"
+        )
+    else:
+        quality_comment = (
+            "商业质量存在明显不确定性，"
+            "不宜仅依靠故事驱动估值。"
+        )
+
+    if valuation >= 75:
+        valuation_comment = (
+            "当前估值在模型框架下具有相对吸引力，"
+            "安全边际尚可。"
+        )
+    elif valuation >= 55:
+        valuation_comment = (
+            "当前估值大致合理，"
+            "未来收益更多依赖盈利增长而非估值扩张。"
+        )
+    else:
+        valuation_comment = (
+            f"当前估值偏贵"
+            + (
+                f"，Trailing P/E 约 {pe:.1f}x。"
+                if pe is not None
+                else "。"
+            )
+        )
+
+    if trend == "BULLISH":
+        technical_comment = (
+            "价格结构处于多头状态，趋势对中期投资者较友好。"
+        )
+    elif trend == "BEARISH":
+        technical_comment = (
+            "价格结构偏弱，基本面再好也需要防范"
+            "估值继续压缩带来的回撤。"
+        )
+    else:
+        technical_comment = (
+            "价格结构处于中性区域，等待趋势进一步确认。"
+        )
+
+    thesis = (
+        f"{ticker} 的核心投资逻辑来自"
+        f"「增长 × 商业质量 × 估值」的组合。"
+        f"当前 AI Conviction 为 {brain['conviction']}/100，"
+        f"模型给出的初步行动评级为 {decision}。"
+    )
+
+    risk_text = (
+        f"主要风险等级为 {risk}/100。"
+        "需要重点关注估值压缩、盈利预期下修、"
+        "宏观流动性变化以及公司特定事件。"
+    )
+
+    return {
+        "thesis": thesis,
+        "growth": growth_comment,
+        "quality": quality_comment,
+        "valuation": valuation_comment,
+        "technical": technical_comment,
+        "risk": risk_text,
+        "decision": decision,
+        "committee": (
+            f"Investment Committee：{decision}。\n\n"
+            f"核心判断：{thesis}\n\n"
+            f"Bull Case：{fmt_money(scenarios['bull'])}\n"
+            f"Base Case：{fmt_money(scenarios['base'])}\n"
+            f"Bear Case：{fmt_money(scenarios['bear'])}\n\n"
+            "该结果是研究辅助框架，不构成投资建议。"
+        ),
+    }
+
+
+def call_llm(
+    ticker: str,
+    context: Dict[str, Any],
+) -> Optional[str]:
+
+    config = ai_config()
+
+    if not config["configured"]:
+        return None
+
+    system_prompt = """
+You are Simon Investment Brain, an institutional-grade US equity
+research committee.
+
+Your job is NOT to blindly predict stock prices.
+
+Analyze the company using five lenses:
+
+1. Value
+2. Business Quality
+3. Growth / First Principles
+4. Market / Momentum
+5. Risk
+
+Then produce:
+
+- Investment thesis
+- Bull case
+- Base case
+- Bear case
+- Key catalysts
+- Key risks
+- What would invalidate the thesis
+- Conviction score 0-100
+- Decision: ACCUMULATE / WATCH / HOLD / REDUCE
+
+Do not claim access to data that is not provided.
+Clearly distinguish facts, inference and assumptions.
+Do not provide personalized financial advice.
+Use concise institutional research language.
+"""
+
+    user_prompt = f"""
+Ticker: {ticker}
+
+Market data:
+{json.dumps(context, ensure_ascii=False, default=str)}
+
+Return a structured research memo.
+"""
+
+    url = (
+        f"{config['base_url']}"
+        "/chat/completions"
+    )
+
+    payload = {
+        "model": config["model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ],
+        "temperature": 0.25,
+    }
+
+    headers = {
+        "Authorization":
+            f"Bearer {config['api_key']}",
+        "Content-Type":
+            "application/json",
+    }
 
     try:
 
-        if get_market_bundle is not None:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=45,
+        )
 
-            bundle = get_market_bundle(
-                ticker,
-                period=period,
-                interval="1d",
-            )
+        response.raise_for_status()
 
-            if isinstance(bundle, dict):
+        data = response.json()
 
-                result["history"] = (
-                    bundle.get(
-                        "history",
-                        pd.DataFrame(),
-                    )
-                    or pd.DataFrame()
-                )
+        return (
+            data
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content")
+        )
 
-                result["quote"] = (
-                    bundle.get(
-                        "quote",
-                        result["quote"],
-                    )
-                    or result["quote"]
-                )
+    except Exception:
+        return None
 
-                result["fundamentals"] = (
-                    bundle.get(
-                        "fundamentals",
-                        result["fundamentals"],
-                    )
-                    or result["fundamentals"]
-                )
 
-                return result
+def run_ai_brain(
+    ticker: str,
+    fundamentals: Dict[str, Any],
+    technicals: Dict[str, Any],
+    brain: Dict[str, Any],
+    scenarios: Dict[str, float],
+) -> Dict[str, Any]:
 
-        # fallback individual loaders
+    context = {
+        "fundamentals": fundamentals,
+        "technicals": technicals,
+        "quant_brain": brain,
+        "valuation_scenarios": scenarios,
+    }
 
-        if get_history is not None:
+    local = local_ai_memo(
+        ticker,
+        fundamentals,
+        technicals,
+        brain,
+        scenarios,
+    )
 
-            result["history"] = (
-                get_history(
-                    ticker,
-                    period=period,
-                    interval="1d",
-                )
-                or pd.DataFrame()
-            )
+    llm = call_llm(
+        ticker,
+        context,
+    )
 
-        if get_quote is not None:
-
-            result["quote"] = (
-                get_quote(ticker)
-                or result["quote"]
-            )
-
-        if get_fundamental_snapshot is not None:
-
-            result["fundamentals"] = (
-                get_fundamental_snapshot(ticker)
-                or result["fundamentals"]
-            )
-
-    except Exception as exc:
-
-        result["error"] = str(exc)
-
-    return result
+    return {
+        "local": local,
+        "llm": llm,
+        "mode": (
+            "LLM COMMITTEE"
+            if llm
+            else "QUANT + LOCAL BRAIN"
+        ),
+    }
 
 
 # ============================================================
@@ -1316,70 +2024,80 @@ with st.sidebar:
 
     st.markdown(
         """
-        <div style="
-            font-size:22px;
-            font-weight:850;
-            letter-spacing:-.7px;
-        ">
-        ◈ SIMON
-        </div>
-        <div style="
-            font-size:10px;
-            color:rgba(255,255,255,.42);
-            letter-spacing:1.5px;
-            margin-top:2px;
-        ">
-        INVESTMENT BRAIN · V14.0
+        <div class="brand-row">
+            <div class="brand-icon">◈</div>
+            <div>
+                <div class="brand-title">Simon</div>
+                <div class="brand-subtitle">
+                    Investment Brain
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.write("")
+    st.markdown(
+        f"""
+        <div style="
+            color:#677082;
+            font-size:10px;
+            margin-bottom:20px;
+        ">
+            AI-NATIVE US EQUITY INTELLIGENCE · V{APP_VERSION}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="sidebar-title">Research</div>',
+        unsafe_allow_html=True,
+    )
 
     ticker_input = st.text_input(
-        "Search security",
+        "Ticker",
         value=st.session_state.ticker,
-        placeholder="NVDA / AAPL / MSFT",
         label_visibility="collapsed",
+        placeholder="AAPL / NVDA / MSFT",
     )
 
     ticker = (
         ticker_input.strip().upper()
         if ticker_input.strip()
-        else "NVDA"
+        else DEFAULT_TICKER
     )
 
     st.session_state.ticker = ticker
 
-    st.divider()
-
     st.markdown(
-        "### Watchlist"
+        '<div class="sidebar-title">Watchlist</div>',
+        unsafe_allow_html=True,
     )
 
-    watchlist = st.session_state.watchlist
+    watch_cols = st.columns(2)
 
-    for symbol in watchlist:
+    for i, symbol in enumerate(
+        WATCHLIST
+    ):
 
-        if st.button(
-            symbol,
-            key=f"watch_{symbol}",
-            use_container_width=True,
-        ):
+        with watch_cols[i % 2]:
 
-            st.session_state.ticker = symbol
-            st.session_state.ai_report = None
-            st.rerun()
-
-    st.divider()
+            if st.button(
+                symbol,
+                key=f"watch_{symbol}",
+                use_container_width=True,
+            ):
+                st.session_state.ticker = symbol
+                st.rerun()
 
     st.markdown(
-        "### Market Window"
+        '<div class="sidebar-title">Market Window</div>',
+        unsafe_allow_html=True,
     )
 
     period = st.selectbox(
-        "History",
+        "Period",
         [
             "1mo",
             "3mo",
@@ -1388,437 +2106,456 @@ with st.sidebar:
             "2y",
             "5y",
             "10y",
-            "max",
         ],
         index=3,
         label_visibility="collapsed",
     )
 
-    st.session_state.period = period
-
-    st.divider()
-
     st.markdown(
-        "### Terminal"
+        '<div class="sidebar-title">Risk Profile</div>',
+        unsafe_allow_html=True,
     )
 
-    density = st.selectbox(
-        "Information density",
+    risk_profile = st.selectbox(
+        "Risk",
         [
-            "Compact",
-            "Comfortable",
-            "Research",
+            "Conservative",
+            "Balanced",
+            "Growth",
+            "Aggressive",
         ],
         index=1,
         label_visibility="collapsed",
     )
 
-    st.session_state.density = density
-
-    st.divider()
-
     st.markdown(
-        "### System"
-
+        '<div class="sidebar-title">System</div>',
+        unsafe_allow_html=True,
     )
 
-    market_online = MARKET_BACKEND
+    ai_cfg = ai_config()
 
-    if market_online:
+    if ai_cfg["configured"]:
 
-        st.success(
-            "MARKET ENGINE · ONLINE"
+        st.markdown(
+            """
+            <div class="online"
+                 style="width:100%;
+                        justify-content:center;
+                        margin-bottom:8px;">
+                <span class="dot"></span>
+                AI BRAIN · ONLINE
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     else:
 
-        st.error(
-            "MARKET ENGINE · OFFLINE"
+        st.markdown(
+            """
+            <div style="
+                width:100%;
+                text-align:center;
+                padding:10px;
+                border-radius:12px;
+                background:rgba(244,201,93,.08);
+                border:1px solid rgba(244,201,93,.15);
+                color:#e5c464;
+                font-size:10px;
+                font-weight:700;
+            ">
+                AI BRAIN · LOCAL MODE
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    if AI_BACKEND:
+    st.caption(
+        "Live market data is best-effort. "
+        "Fallback mode keeps the terminal usable."
+    )
 
-        try:
 
-            ai_status = ai_health_check()
+# ============================================================
+# LOAD DATA
+# ============================================================
 
-        except Exception:
+with st.spinner(
+    f"Synchronizing {ticker} intelligence..."
+):
 
-            ai_status = {
-                "configured": False,
-                "provider": "Unavailable",
-                "model": "—",
-            }
-
-    else:
-
-        ai_status = {
-            "configured": False,
-            "provider": "Unavailable",
-            "model": "—",
-        }
-
-    if ai_status.get("configured"):
-
-        st.success(
-            "AI BRAIN · ONLINE"
+    history, market_source, market_error = (
+        fetch_history(
+            ticker,
+            period,
         )
+    )
 
-        st.caption(
-            f"{ai_status.get('provider', 'AI')} · "
-            f"{ai_status.get('model', '')}"
+    fundamentals, fundamental_source, fundamental_error = (
+        fetch_profile(
+            ticker
         )
+    )
 
-    else:
+    quote = fetch_quote(
+        ticker,
+        history,
+    )
 
-        st.warning(
-            "AI BRAIN · STANDBY"
-        )
+    technical_df = calculate_technicals(
+        history
+    )
 
-        st.caption(
-            "Configure API credentials to enable deep research."
-        )
+    technicals = technical_snapshot(
+        technical_df
+    )
+
+    brain = compute_brain(
+        ticker,
+        fundamentals,
+        technicals,
+    )
+
+    scenarios = valuation_scenarios(
+        quote.get("price"),
+        fundamentals,
+    )
 
 
 # ============================================================
 # HEADER
 # ============================================================
 
+now = datetime.now().strftime(
+    "%Y-%m-%d %H:%M"
+)
+
+data_is_live = (
+    market_source == "LIVE"
+)
+
+data_badge_class = (
+    "data-badge-live"
+    if data_is_live
+    else "data-badge-demo"
+)
+
+data_badge_text = (
+    "MARKET ENGINE · LIVE"
+    if data_is_live
+    else "MARKET ENGINE · FALLBACK"
+)
+
 st.markdown(
-    """
-<div class="sb-header">
+    f"""
+    <div class="topbar">
 
-<div class="sb-brand">
+        <div class="topbar-left">
+            US EQUITY INTELLIGENCE TERMINAL
+            &nbsp;·&nbsp;
+            {now}
+        </div>
 
-<div class="sb-logo">
-◈
-</div>
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:8px;
+        ">
 
-<div>
-<div class="sb-title">
-SIMON Investment Brain
-</div>
+            <span class="data-badge {data_badge_class}">
+                {data_badge_text}
+            </span>
 
-<div class="sb-subtitle">
-AI-NATIVE US EQUITY INTELLIGENCE TERMINAL
-</div>
-</div>
+            <span class="online">
+                <span class="dot"></span>
+                BRAIN READY
+            </span>
 
-</div>
+        </div>
 
-<div class="sb-status">
-<span class="sb-dot"></span>
-MARKET ENGINE READY
-</div>
-
-</div>
-""",
+    </div>
+    """,
     unsafe_allow_html=True,
 )
 
 
 # ============================================================
-# MARKET LOAD
+# FALLBACK NOTICE
 # ============================================================
 
-with st.spinner(
-    f"Connecting to {ticker} market data..."
-):
+if not data_is_live:
 
-    market = load_market_data(
-        ticker,
-        period,
+    st.warning(
+        "Live market data is temporarily unavailable. "
+        "Simon Investment Brain has switched to fallback mode "
+        "so the terminal remains usable. "
+        f"Source detail: {market_error or 'unknown'}"
     )
-
-
-history = market["history"]
-quote = safe_dict(
-    market["quote"]
-)
-fundamentals = safe_dict(
-    market["fundamentals"]
-)
-
-if history is None:
-    history = pd.DataFrame()
-
-technical_df = calculate_technicals(
-    history
-)
-
-technicals = technical_summary(
-    technical_df
-)
-
-brain = calculate_brain_scores(
-    fundamentals,
-    technicals,
-)
-
-
-# ============================================================
-# NORMALIZE QUOTE
-# ============================================================
-
-price = get_value(
-    quote,
-    "price",
-    "current_price",
-    "regularMarketPrice",
-)
-
-change = get_value(
-    quote,
-    "change",
-    "price_change",
-    "regularMarketChange",
-)
-
-change_pct = get_value(
-    quote,
-    "change_percent",
-    "changePercent",
-    "regularMarketChangePercent",
-)
-
-volume = get_value(
-    quote,
-    "volume",
-    "regularMarketVolume",
-)
-
-company_name = get_value(
-    fundamentals,
-    "name",
-    "longName",
-    "shortName",
-    default=ticker,
-)
-
-sector = get_value(
-    fundamentals,
-    "sector",
-    default="—",
-)
-
-industry = get_value(
-    fundamentals,
-    "industry",
-    default="—",
-)
 
 
 # ============================================================
 # HERO
 # ============================================================
 
-change_number = safe_float(change)
-
-change_class = "neutral"
-
-if change_number is not None:
-
-    if change_number > 0:
-        change_class = "up"
-
-    elif change_number < 0:
-        change_class = "down"
-
-change_prefix = ""
-
-if change_number is not None and change_number > 0:
-    change_prefix = "+"
-
-change_pct_display = fmt_percent(
-    change_pct
+company_name = (
+    fundamentals.get(
+        "name"
+    )
+    or ticker
 )
+
+price = quote.get(
+    "price"
+)
+
+change = quote.get(
+    "change"
+)
+
+change_pct = quote.get(
+    "change_percent"
+)
+
+if change is None:
+
+    change_html = "—"
+
+    change_class = "hero-change-flat"
+
+else:
+
+    if change > 0:
+        change_class = "hero-change-up"
+        sign = "+"
+    elif change < 0:
+        change_class = "hero-change-down"
+        sign = ""
+    else:
+        change_class = "hero-change-flat"
+        sign = ""
+
+    change_html = (
+        f"{sign}{fmt_money(change)}"
+        f"&nbsp;&nbsp;"
+        f"{sign}{fmt_percent(change_pct)}"
+    )
+
 
 st.markdown(
     f"""
-<div class="hero">
+    <div class="hero">
 
-<div class="hero-symbol">
-NASDAQ · {ticker}
-</div>
+        <div class="hero-kicker">
+            {fundamentals.get('sector') or 'US EQUITY'}
+            &nbsp;·&nbsp;
+            {fundamentals.get('industry') or 'MARKET'}
+        </div>
 
-<div class="hero-company">
-{company_name}
-</div>
+        <div class="hero-symbol">
+            {ticker}
+        </div>
 
-<div class="hero-price">
-{fmt_money(price)}
-</div>
+        <div class="hero-name">
+            {company_name}
+        </div>
 
-<div class="hero-change {change_class}">
-{change_prefix}{fmt_money(change)}
-&nbsp;&nbsp;·&nbsp;&nbsp;
-{change_prefix}{change_pct_display}
-</div>
+        <div class="hero-price">
+            {fmt_money(price)}
+        </div>
 
-<div class="hero-meta">
+        <div class="{change_class}"
+             style="
+                margin-top:10px;
+                font-size:15px;
+                font-weight:700;
+             ">
+            {change_html}
+        </div>
 
-<div class="meta-pill">
-{sector}
-</div>
+        <div class="hero-meta">
 
-<div class="meta-pill">
-{industry}
-</div>
+            <span class="pill">
+                Trend · {technicals.get('trend', '—')}
+            </span>
 
-<div class="meta-pill">
-Trend · {technicals.get("trend", "—")}
-</div>
+            <span class="pill">
+                Momentum · {technicals.get('momentum', '—')}
+            </span>
 
-<div class="meta-pill">
-Momentum · {technicals.get("momentum", "—")}
-</div>
+            <span class="pill">
+                AI · {brain['decision']}
+            </span>
 
-</div>
+            <span class="pill">
+                Risk · {brain['risk']}/100
+            </span>
 
-</div>
-""",
+        </div>
+
+    </div>
+    """,
     unsafe_allow_html=True,
 )
 
 
 # ============================================================
-# BACKEND ERROR
+# CONVICTION + HERO METRICS
 # ============================================================
 
-if market.get("error"):
+st.write("")
 
-    st.warning(
-        "Market data is temporarily unavailable. "
-        "The terminal remains online and will retry automatically."
+left, right = st.columns(
+    [1.15, 3.85]
+)
+
+with left:
+
+    score = brain["conviction"]
+
+    st.markdown(
+        f"""
+        <div class="conviction">
+
+            <div class="conviction-label">
+                AI CONVICTION
+            </div>
+
+            <div class="conviction-score">
+                {score}
+                <span style="
+                    font-size:18px;
+                    color:#747d8d;
+                    font-weight:500;
+                ">
+                    /100
+                </span>
+            </div>
+
+            <div class="conviction-bar">
+                <div class="conviction-fill"
+                     style="width:{score}%;">
+                </div>
+            </div>
+
+            <div class="conviction-label-row">
+                <span>LOW</span>
+                <span>NEUTRAL</span>
+                <span>HIGH</span>
+            </div>
+
+            <div style="
+                margin-top:20px;
+                font-size:12px;
+                color:#aeb6c5;
+            ">
+                {brain['decision']}
+            </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+
+
+with right:
+
+    metrics = [
+        (
+            "MARKET CAP",
+            fmt_large(
+                fundamentals.get(
+                    "market_cap"
+                )
+            ),
+            "Equity value",
+        ),
+        (
+            "P / E",
+            (
+                f"{safe_float(fundamentals.get('pe')):.1f}x"
+                if safe_float(
+                    fundamentals.get("pe")
+                ) is not None
+                else "—"
+            ),
+            "Trailing valuation",
+        ),
+        (
+            "REVENUE GROWTH",
+            fmt_percent(
+                fundamentals.get(
+                    "revenue_growth"
+                )
+            ),
+            "YoY growth",
+        ),
+        (
+            "ROE",
+            fmt_percent(
+                fundamentals.get(
+                    "roe"
+                )
+            ),
+            "Capital efficiency",
+        ),
+        (
+            "RSI",
+            (
+                f"{technicals.get('rsi'):.1f}"
+                if technicals.get(
+                    "rsi"
+                ) is not None
+                else "—"
+            ),
+            "14D momentum",
+        ),
+    ]
+
+    cols = st.columns(5)
+
+    for col, item in zip(
+        cols,
+        metrics,
+    ):
+
+        label, value, caption = item
+
+        with col:
+
+            st.markdown(
+                f"""
+                <div class="metric-card">
+
+                    <div class="metric-label">
+                        {label}
+                    </div>
+
+                    <div class="metric-value">
+                        {value}
+                    </div>
+
+                    <div class="metric-caption">
+                        {caption}
+                    </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 # ============================================================
-# KPI ROW
-# ============================================================
-
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-
-
-with k1:
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">Market Cap</div>
-        <div class="kpi-value">
-        {fmt_number(get_value(fundamentals, "market_cap"))}
-        </div>
-        <div class="kpi-sub">Equity value</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with k2:
-
-    pe = get_value(
-        fundamentals,
-        "pe",
-        "trailing_pe",
-    )
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">P / E</div>
-        <div class="kpi-value">
-        {fmt_number(pe)}
-        </div>
-        <div class="kpi-sub">Trailing valuation</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with k3:
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">Revenue Growth</div>
-        <div class="kpi-value">
-        {fmt_percent(get_value(fundamentals, "revenue_growth", "revenueGrowth"))}
-        </div>
-        <div class="kpi-sub">YoY growth</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with k4:
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">ROE</div>
-        <div class="kpi-value">
-        {fmt_percent(get_value(fundamentals, "roe", "return_on_equity"))}
-        </div>
-        <div class="kpi-sub">Capital efficiency</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with k5:
-
-    rsi_display = (
-        f"{technicals['rsi']:.1f}"
-        if technicals.get("rsi") is not None
-        else "—"
-    )
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">RSI</div>
-        <div class="kpi-value">
-        {rsi_display}
-        </div>
-        <div class="kpi-sub">14D momentum</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with k6:
-
-    st.markdown(
-        f"""
-        <div class="glass kpi">
-        <div class="kpi-label">AI Conviction</div>
-        <div class="kpi-value">
-        {brain["conviction"]}/100
-        </div>
-        <div class="kpi-sub">Research composite</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# NAVIGATION
+# MAIN NAV
 # ============================================================
 
 tabs = st.tabs(
     [
         "◉ Overview",
-        "◈ AI Brain",
-        "▣ Fundamentals",
+        "✦ AI Brain",
+        "▦ Fundamentals",
         "⌁ Technicals",
-        "⚠ Risk",
+        "△ Risk",
         "◎ Research",
     ]
 )
@@ -1831,125 +2568,182 @@ tabs = st.tabs(
 with tabs[0]:
 
     left, right = st.columns(
-        [1.75, 1]
+        [2.25, 1]
     )
-
-    # --------------------------------------------------------
-    # CHART
-    # --------------------------------------------------------
 
     with left:
 
         st.markdown(
-            '<div class="section-title">Price Intelligence</div>',
+            """
+            <div class="section-head">
+                <div>
+                    <div class="section-title">
+                        Price Intelligence
+                    </div>
+                    <div class="section-subtitle">
+                        MARKET STRUCTURE · TREND · MOMENTUM
+                    </div>
+                </div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
-        st.markdown(
-            '<div class="section-sub">Market structure · trend · momentum</div>',
-            unsafe_allow_html=True,
-        )
+        chart_cols = [
+            "Close",
+            "SMA20",
+            "SMA50",
+            "SMA200",
+        ]
 
-        if not technical_df.empty:
-
-            chart_columns = [
-                c
-                for c in [
-                    "Close",
-                    "SMA20",
-                    "SMA50",
-                    "SMA200",
-                ]
+        chart_df = technical_df[
+            [
+                c for c in chart_cols
                 if c in technical_df.columns
             ]
+        ].dropna(
+            how="all"
+        )
 
-            st.line_chart(
-                technical_df[chart_columns],
-                height=420,
-            )
+        st.line_chart(
+            chart_df,
+            height=410,
+        )
 
-        else:
+    with right:
+
+        st.markdown(
+            """
+            <div class="section-head">
+                <div>
+                    <div class="section-title">
+                        Market Signals
+                    </div>
+                    <div class="section-subtitle">
+                        SYSTEMATIC SIGNALS
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        signal_items = [
+            (
+                "TREND REGIME",
+                technicals.get(
+                    "trend",
+                    "UNKNOWN",
+                ),
+            ),
+            (
+                "MOMENTUM",
+                technicals.get(
+                    "momentum",
+                    "UNKNOWN",
+                ),
+            ),
+            (
+                "MACD",
+                technicals.get(
+                    "macd_state",
+                    "UNKNOWN",
+                ),
+            ),
+            (
+                "VOLATILITY",
+                fmt_percent(
+                    technicals.get(
+                        "volatility_30d"
+                    )
+                ),
+            ),
+        ]
+
+        for label, value in signal_items:
 
             st.markdown(
-                """
-                <div class="glass"
-                style="
-                    height:420px;
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    color:rgba(255,255,255,.35);
-                ">
-                Waiting for market data...
+                f"""
+                <div class="risk-card"
+                     style="margin-bottom:10px;">
+
+                    <div class="metric-label">
+                        {label}
+                    </div>
+
+                    <div style="
+                        margin-top:9px;
+                        font-size:15px;
+                        font-weight:800;
+                    ">
+                        {value}
+                    </div>
+
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
     # --------------------------------------------------------
-    # SIGNALS
+    # INVESTMENT THESIS
     # --------------------------------------------------------
 
-    with right:
+    local = local_ai_memo(
+        ticker,
+        fundamentals,
+        technicals,
+        brain,
+        scenarios,
+    )
 
-        st.markdown(
-            '<div class="section-title">Market Signals</div>',
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Investment Thesis
+                </div>
+                <div class="section-subtitle">
+                    AI-SYNTHESIZED DECISION FRAMEWORK
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        st.markdown(
-            f"""
-            <div class="signal">
-            <div class="signal-label">Trend Regime</div>
-            <div class="signal-value">
-            {technicals.get("trend", "—")}
-            </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <div class="thesis-card">
 
-        st.write("")
+            <div class="thesis-title">
+                {brain['decision']}
+            </div>
 
-        st.markdown(
-            f"""
-            <div class="signal">
-            <div class="signal-label">Momentum</div>
-            <div class="signal-value">
-            {technicals.get("momentum", "—")}
+            <div class="thesis-text">
+                {local['thesis']}
             </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-        st.write("")
+            <div style="
+                height:1px;
+                background:rgba(255,255,255,.06);
+                margin:18px 0;
+            "></div>
 
-        st.markdown(
-            f"""
-            <div class="signal">
-            <div class="signal-label">Volume</div>
-            <div class="signal-value">
-            {fmt_number(volume)}
+            <div class="thesis-text">
+                {local['quality']}
+                <br><br>
+                {local['growth']}
+                <br><br>
+                {local['valuation']}
+                <br><br>
+                {local['technical']}
             </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-        st.write("")
-
-        st.markdown(
-            f"""
-            <div class="signal">
-            <div class="signal-label">AI Conviction</div>
-            <div class="signal-value">
-            {brain["conviction"]} / 100
-            </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -1959,206 +2753,264 @@ with tabs[0]:
 with tabs[1]:
 
     st.markdown(
-        f"""
-        <div class="brain-card">
+        """
+        <div class="brain">
 
-        <div class="brain-label">
-        SIMON AI INVESTMENT BRAIN
-        </div>
+            <div class="brain-header">
 
-        <div class="brain-title">
-        {ticker} Intelligence Matrix
-        </div>
+                <div>
+                    <div class="brain-title">
+                        Investment Brain
+                    </div>
 
-        <div class="brain-description">
-        Multi-dimensional investment reasoning across
-        business quality, competitive moat, growth,
-        valuation, momentum and risk.
-        </div>
+                    <div class="section-subtitle">
+                        VALUE · QUALITY · GROWTH · MOMENTUM · RISK
+                    </div>
+                </div>
+
+                <div class="brain-status">
+                    ● COMPUTING
+                </div>
+
+            </div>
 
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    score_columns = st.columns(6)
+    st.write("")
 
-    score_items = [
-        ("QUALITY", brain["quality"]),
-        ("MOAT", brain["moat"]),
-        ("GROWTH", brain["growth"]),
-        ("VALUATION", brain["valuation"]),
-        ("MOMENTUM", brain["momentum"]),
-        ("RISK", brain["risk"]),
+    agents = [
+        (
+            "VALUE ENGINE",
+            brain["valuation"],
+            "Intrinsic value & valuation discipline",
+        ),
+        (
+            "BUSINESS QUALITY",
+            brain["quality"],
+            "Moat · margins · capital efficiency",
+        ),
+        (
+            "GROWTH ENGINE",
+            brain["growth"],
+            "Revenue · earnings · structural growth",
+        ),
+        (
+            "MOMENTUM ENGINE",
+            brain["momentum"],
+            "Trend · RSI · market structure",
+        ),
+        (
+            "BALANCE SHEET",
+            brain["balance"],
+            "Leverage · liquidity · resilience",
+        ),
     ]
 
-    for column, (label, score) in zip(
-        score_columns,
-        score_items,
+    agent_cols = st.columns(5)
+
+    for col, item in zip(
+        agent_cols,
+        agents,
     ):
 
-        with column:
+        name, score_value, note = item
+
+        with col:
 
             st.markdown(
                 f"""
-                <div class="glass score-box">
+                <div class="agent">
 
-                <div class="score-number">
-                {score}
-                </div>
+                    <div class="agent-name">
+                        {name}
+                    </div>
 
-                <div class="score-caption">
-                {label}
-                </div>
+                    <div class="agent-score">
+                        {score_value}
+                    </div>
+
+                    <div class="agent-line">
+                        <div class="agent-fill"
+                             style="width:{score_value}%;">
+                        </div>
+                    </div>
+
+                    <div class="agent-note">
+                        {note}
+                    </div>
 
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
+    st.write("")
+
+    # --------------------------------------------------------
+    # VALUATION
+    # --------------------------------------------------------
 
     st.markdown(
-        '<div class="section-title">Investment Brain</div>',
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Scenario Engine
+                </div>
+                <div class="section-subtitle">
+                    BEAR · BASE · BULL
+                </div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    brain_left, brain_right = st.columns(
-        [1.4, 1]
+    scenario_cols = st.columns(3)
+
+    scenario_data = [
+        (
+            scenario_cols[0],
+            "BEAR CASE",
+            scenarios["bear"],
+            "scenario-down",
+        ),
+        (
+            scenario_cols[1],
+            "BASE CASE",
+            scenarios["base"],
+            "scenario-neutral",
+        ),
+        (
+            scenario_cols[2],
+            "BULL CASE",
+            scenarios["bull"],
+            "scenario-up",
+        ),
+    ]
+
+    for col, label, value, css_class in scenario_data:
+
+        with col:
+
+            upside = (
+                value / price - 1
+                if price
+                else None
+            )
+
+            st.markdown(
+                f"""
+                <div class="scenario">
+
+                    <div class="scenario-name">
+                        {label}
+                    </div>
+
+                    <div class="scenario-price {css_class}">
+                        {fmt_money(value)}
+                    </div>
+
+                    <div style="
+                        margin-top:6px;
+                        color:#747d8e;
+                        font-size:10px;
+                    ">
+                        {fmt_percent(upside)}
+                        vs current
+                    </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.write("")
+
+    # --------------------------------------------------------
+    # RUN RESEARCH
+    # --------------------------------------------------------
+
+    st.markdown(
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Research Committee
+                </div>
+                <div class="section-subtitle">
+                    LOCAL QUANT BRAIN + OPTIONAL LLM COMMITTEE
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
+    if st.button(
+        "✦ Run Investment Committee",
+        type="primary",
+        use_container_width=True,
+    ):
 
-    with brain_left:
+        with st.spinner(
+            "Investment Brain is reasoning across multiple layers..."
+        ):
+
+            st.session_state.research = run_ai_brain(
+                ticker,
+                fundamentals,
+                technicals,
+                brain,
+                scenarios,
+            )
+
+    research = st.session_state.research
+
+    if research is None:
+
+        st.info(
+            "Click Run Investment Committee to generate a full research memo."
+        )
+
+    else:
+
+        local = research["local"]
 
         st.markdown(
             f"""
-            <div class="glass">
+            <div class="brain">
 
-            <div class="brain-label">
-            CORE THESIS
-            </div>
+                <div class="brain-header">
 
-            <div style="
-                font-size:21px;
-                font-weight:850;
-                margin-top:5px;
-            ">
-            {ticker} · Structural Intelligence
-            </div>
+                    <div>
+                        <div class="brain-title">
+                            {research['mode']}
+                        </div>
 
-            <div class="research"
-            style="margin-top:16px;">
+                        <div class="section-subtitle">
+                            {ticker} · INVESTMENT COMMITTEE OUTPUT
+                        </div>
+                    </div>
 
-            <b>Business Quality</b><br>
-            The current model evaluates profitability,
-            capital efficiency and operating characteristics.
+                    <div class="brain-status">
+                        CONVICTION {brain['conviction']}/100
+                    </div>
 
-            <br><br>
+                </div>
 
-            <b>Competitive Moat</b><br>
-            Moat strength is estimated from quality,
-            growth and valuation characteristics.
-
-            <br><br>
-
-            <b>Growth Engine</b><br>
-            Revenue and earnings acceleration are incorporated
-            into the growth score.
-
-            <br><br>
-
-            <b>Valuation</b><br>
-            Current valuation is interpreted relative to
-            simplified historical-style valuation bands.
-
-            <br><br>
-
-            <b>Risk</b><br>
-            Leverage, trend deterioration and extreme momentum
-            conditions increase the risk score.
-
-            </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-    with brain_right:
-
-        st.markdown(
-            """
-            <div class="glass">
-
-            <div class="brain-label">
-            DECISION MAP
-            </div>
-
-            """,
-            unsafe_allow_html=True,
-        )
-
-        conviction = brain["conviction"]
-
-        if conviction >= 80:
-
-            decision = "HIGH CONVICTION"
-            decision_note = "Strong multi-factor alignment."
-
-        elif conviction >= 65:
-
-            decision = "POSITIVE BIAS"
-            decision_note = "Favorable setup with caveats."
-
-        elif conviction >= 50:
-
-            decision = "NEUTRAL"
-            decision_note = "Evidence remains mixed."
-
-        elif conviction >= 35:
-
-            decision = "CAUTIOUS"
-            decision_note = "Risk/reward requires discipline."
-
-        else:
-
-            decision = "LOW CONVICTION"
-            decision_note = "Weak multi-factor alignment."
-
-        st.markdown(
-            f"""
-            <div style="
-                font-size:29px;
-                font-weight:900;
-                margin-top:12px;
-                letter-spacing:-1px;
-            ">
-            {conviction}
-            </div>
-
-            <div style="
-                font-size:11px;
-                color:rgba(255,255,255,.45);
-                margin-top:-3px;
-            ">
-            / 100 CONVICTION
-            </div>
-
-            <div style="
-                margin-top:18px;
-                font-size:16px;
-                font-weight:800;
-            ">
-            {decision}
-            </div>
-
-            <div style="
-                margin-top:6px;
-                font-size:11px;
-                color:rgba(255,255,255,.45);
-            ">
-            {decision_note}
-            </div>
+                <div style="
+                    margin-top:22px;
+                    color:#c1c8d5;
+                    font-size:13px;
+                    line-height:1.8;
+                    white-space:pre-wrap;
+                ">
+                    {research['llm'] or local['committee']}
+                </div>
 
             </div>
             """,
@@ -2173,132 +3025,252 @@ with tabs[1]:
 with tabs[2]:
 
     st.markdown(
-        '<div class="section-title">Fundamental Intelligence</div>',
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Fundamental Intelligence
+                </div>
+                <div class="section-subtitle">
+                    BUSINESS QUALITY · GROWTH · VALUATION · BALANCE SHEET
+                </div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    f1, f2, f3 = st.columns(3)
+    f1, f2, f3, f4 = st.columns(4)
 
-    with f1:
+    fundamental_blocks = [
+        (
+            f1,
+            "VALUATION",
+            [
+                (
+                    "P / E",
+                    (
+                        f"{safe_float(fundamentals.get('pe')):.1f}x"
+                        if safe_float(
+                            fundamentals.get("pe")
+                        ) is not None
+                        else "—"
+                    ),
+                ),
+                (
+                    "Forward P/E",
+                    (
+                        f"{safe_float(fundamentals.get('forward_pe')):.1f}x"
+                        if safe_float(
+                            fundamentals.get("forward_pe")
+                        ) is not None
+                        else "—"
+                    ),
+                ),
+                (
+                    "P / B",
+                    (
+                        f"{safe_float(fundamentals.get('price_to_book')):.1f}x"
+                        if safe_float(
+                            fundamentals.get("price_to_book")
+                        ) is not None
+                        else "—"
+                    ),
+                ),
+            ],
+        ),
+        (
+            f2,
+            "GROWTH",
+            [
+                (
+                    "Revenue Growth",
+                    fmt_percent(
+                        fundamentals.get(
+                            "revenue_growth"
+                        )
+                    ),
+                ),
+                (
+                    "Earnings Growth",
+                    fmt_percent(
+                        fundamentals.get(
+                            "earnings_growth"
+                        )
+                    ),
+                ),
+                (
+                    "ROE",
+                    fmt_percent(
+                        fundamentals.get(
+                            "roe"
+                        )
+                    ),
+                ),
+            ],
+        ),
+        (
+            f3,
+            "PROFITABILITY",
+            [
+                (
+                    "Gross Margin",
+                    fmt_percent(
+                        fundamentals.get(
+                            "gross_margin"
+                        )
+                    ),
+                ),
+                (
+                    "Operating Margin",
+                    fmt_percent(
+                        fundamentals.get(
+                            "operating_margin"
+                        )
+                    ),
+                ),
+                (
+                    "Free Cash Flow",
+                    fmt_large(
+                        fundamentals.get(
+                            "free_cash_flow"
+                        )
+                    ),
+                ),
+            ],
+        ),
+        (
+            f4,
+            "BALANCE SHEET",
+            [
+                (
+                    "Cash",
+                    fmt_large(
+                        fundamentals.get(
+                            "cash"
+                        )
+                    ),
+                ),
+                (
+                    "Debt",
+                    fmt_large(
+                        fundamentals.get(
+                            "debt"
+                        )
+                    ),
+                ),
+                (
+                    "Debt / Equity",
+                    (
+                        f"{safe_float(fundamentals.get('debt_to_equity')):.1f}%"
+                        if safe_float(
+                            fundamentals.get(
+                                "debt_to_equity"
+                            )
+                        ) is not None
+                        else "—"
+                    ),
+                ),
+            ],
+        ),
+    ]
 
-        st.markdown(
-            f"""
-            <div class="glass">
+    for col, title, rows in fundamental_blocks:
 
-            <div class="brain-label">
-            VALUATION
+        with col:
+
+            html = f"""
+            <div class="thesis-card">
+
+                <div class="metric-label">
+                    {title}
+                </div>
+            """
+
+            for label, value in rows:
+
+                html += f"""
+                    <div style="
+                        display:flex;
+                        justify-content:space-between;
+                        margin-top:17px;
+                        font-size:11px;
+                    ">
+                        <span style="color:#788294;">
+                            {label}
+                        </span>
+
+                        <span style="
+                            color:#e4e8ef;
+                            font-weight:700;
+                        ">
+                            {value}
+                        </span>
+                    </div>
+                """
+
+            html += "</div>"
+
+            st.markdown(
+                html,
+                unsafe_allow_html=True,
+            )
+
+    st.write("")
+
+    st.markdown(
+        f"""
+        <div class="glass"
+             style="padding:22px;">
+
+            <div class="metric-label">
+                COMPANY PROFILE
             </div>
 
-            <div style="margin-top:15px;line-height:2;">
+            <div style="
+                margin-top:16px;
+                display:grid;
+                grid-template-columns:
+                    repeat(2, minmax(0,1fr));
+                gap:16px;
+                color:#9da6b5;
+                font-size:12px;
+            ">
 
-            <b>P/E</b> ·
-            {fmt_number(get_value(fundamentals, "pe", "trailing_pe"))}
+                <div>
+                    <b style="color:#e2e6ee;">
+                        Company
+                    </b><br>
+                    {company_name}
+                </div>
 
-            <br>
+                <div>
+                    <b style="color:#e2e6ee;">
+                        Sector
+                    </b><br>
+                    {fundamentals.get('sector') or '—'}
+                </div>
 
-            <b>Forward P/E</b> ·
-            {fmt_number(get_value(fundamentals, "forward_pe"))}
+                <div>
+                    <b style="color:#e2e6ee;">
+                        Industry
+                    </b><br>
+                    {fundamentals.get('industry') or '—'}
+                </div>
 
-            <br>
-
-            <b>P/B</b> ·
-            {fmt_number(get_value(fundamentals, "price_to_book"))}
-
-            <br>
-
-            <b>EV / EBITDA</b> ·
-            {fmt_number(get_value(fundamentals, "ev_to_ebitda"))}
-
-            </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with f2:
-
-        st.markdown(
-            f"""
-            <div class="glass">
-
-            <div class="brain-label">
-            GROWTH & PROFITABILITY
-            </div>
-
-            <div style="margin-top:15px;line-height:2;">
-
-            <b>Revenue Growth</b> ·
-            {fmt_percent(get_value(fundamentals, "revenue_growth", "revenueGrowth"))}
-
-            <br>
-
-            <b>Earnings Growth</b> ·
-            {fmt_percent(get_value(fundamentals, "earnings_growth", "earningsGrowth"))}
-
-            <br>
-
-            <b>Gross Margin</b> ·
-            {fmt_percent(get_value(fundamentals, "gross_margin", "grossMargin"))}
-
-            <br>
-
-            <b>Operating Margin</b> ·
-            {fmt_percent(get_value(fundamentals, "operating_margin", "operatingMargin"))}
-
-            <br>
-
-            <b>ROE</b> ·
-            {fmt_percent(get_value(fundamentals, "roe", "return_on_equity"))}
+                <div>
+                    <b style="color:#e2e6ee;">
+                        Country
+                    </b><br>
+                    {fundamentals.get('country') or '—'}
+                </div>
 
             </div>
 
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with f3:
-
-        st.markdown(
-            f"""
-            <div class="glass">
-
-            <div class="brain-label">
-            BALANCE SHEET
-            </div>
-
-            <div style="margin-top:15px;line-height:2;">
-
-            <b>Cash</b> ·
-            {fmt_number(get_value(fundamentals, "total_cash"))}
-
-            <br>
-
-            <b>Debt</b> ·
-            {fmt_number(get_value(fundamentals, "total_debt"))}
-
-            <br>
-
-            <b>Current Ratio</b> ·
-            {fmt_number(get_value(fundamentals, "current_ratio"))}
-
-            <br>
-
-            <b>Debt / Equity</b> ·
-            {fmt_number(get_value(fundamentals, "debt_to_equity"))}
-
-            <br>
-
-            <b>Free Cash Flow</b> ·
-            {fmt_number(get_value(fundamentals, "free_cash_flow"))}
-
-            </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -2308,89 +3280,99 @@ with tabs[2]:
 with tabs[3]:
 
     st.markdown(
-        '<div class="section-title">Technical Intelligence</div>',
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Technical Intelligence
+                </div>
+                <div class="section-subtitle">
+                    TREND · MOVING AVERAGES · RSI · MACD
+                </div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    if not technical_df.empty:
-
-        t1, t2 = st.columns(
-            [2, 1]
-        )
-
-        with t1:
-
-            columns = [
-                c
-                for c in [
-                    "Close",
-                    "SMA20",
-                    "SMA50",
-                    "SMA200",
-                ]
-                if c in technical_df.columns
+    technical_chart = technical_df[
+        [
+            c for c in [
+                "Close",
+                "SMA20",
+                "SMA50",
+                "SMA200",
             ]
+            if c in technical_df.columns
+        ]
+    ]
 
-            st.line_chart(
-                technical_df[columns],
-                height=450,
-            )
+    st.line_chart(
+        technical_chart,
+        height=460,
+    )
 
-        with t2:
+    tcols = st.columns(5)
+
+    technical_metrics = [
+        (
+            "PRICE",
+            fmt_money(
+                technicals.get("price")
+            ),
+        ),
+        (
+            "SMA 20",
+            fmt_money(
+                technicals.get("sma20")
+            ),
+        ),
+        (
+            "SMA 50",
+            fmt_money(
+                technicals.get("sma50")
+            ),
+        ),
+        (
+            "SMA 200",
+            fmt_money(
+                technicals.get("sma200")
+            ),
+        ),
+        (
+            "RSI",
+            (
+                f"{technicals.get('rsi'):.2f}"
+                if technicals.get("rsi")
+                is not None
+                else "—"
+            ),
+        ),
+    ]
+
+    for col, (label, value) in zip(
+        tcols,
+        technical_metrics,
+    ):
+
+        with col:
 
             st.markdown(
                 f"""
-                <div class="glass">
+                <div class="metric-card">
 
-                <div class="brain-label">
-                TECHNICAL SNAPSHOT
-                </div>
+                    <div class="metric-label">
+                        {label}
+                    </div>
 
-                <div style="
-                    line-height:2.3;
-                    margin-top:13px;
-                ">
-
-                <b>Trend</b><br>
-                {technicals.get("trend")}
-
-                <br>
-
-                <b>Momentum</b><br>
-                {technicals.get("momentum")}
-
-                <br>
-
-                <b>SMA 20</b><br>
-                {fmt_money(technicals.get("sma20"))}
-
-                <br>
-
-                <b>SMA 50</b><br>
-                {fmt_money(technicals.get("sma50"))}
-
-                <br>
-
-                <b>SMA 200</b><br>
-                {fmt_money(technicals.get("sma200"))}
-
-                <br>
-
-                <b>RSI</b><br>
-                {rsi_display}
-
-                </div>
+                    <div class="metric-value">
+                        {value}
+                    </div>
 
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-
-    else:
-
-        st.info(
-            "Technical data is currently unavailable."
-        )
 
 
 # ============================================================
@@ -2400,141 +3382,127 @@ with tabs[3]:
 with tabs[4]:
 
     st.markdown(
-        '<div class="section-title">Risk Intelligence</div>',
+        """
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Risk Intelligence
+                </div>
+                <div class="section-subtitle">
+                    DOWNSIDE · VOLATILITY · BALANCE SHEET · THESIS RISK
+                </div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    risk = brain["risk"]
-
     r1, r2, r3 = st.columns(3)
 
-    with r1:
+    risk_items = [
+        (
+            r1,
+            "OVERALL RISK",
+            brain["risk"],
+        ),
+        (
+            r2,
+            "BALANCE SHEET",
+            100 - brain["balance"],
+        ),
+        (
+            r3,
+            "VALUATION RISK",
+            100 - brain["valuation"],
+        ),
+    ]
 
-        st.markdown(
-            f"""
-            <div class="glass score-box">
+    for col, label, value in risk_items:
 
-            <div class="score-number">
-            {risk}
-            </div>
+        with col:
 
-            <div class="score-caption">
-            RISK SCORE
-            </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with r2:
-
-        trend_risk = (
-            "Elevated"
-            if technicals.get("trend") == "BEARISH"
-            else "Normal"
-        )
-
-        st.markdown(
-            f"""
-            <div class="glass score-box">
-
-            <div style="
-                font-size:25px;
-                font-weight:850;
-            ">
-            {trend_risk}
-            </div>
-
-            <div class="score-caption">
-            TREND RISK
-            </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with r3:
-
-        debt = safe_float(
-            get_value(
-                fundamentals,
-                "debt_to_equity",
+            css = score_class(
+                100 - value
             )
-        )
 
-        balance = (
-            "Watch"
-            if debt is not None and debt > 150
-            else "Normal"
-        )
+            st.markdown(
+                f"""
+                <div class="risk-card">
 
-        st.markdown(
-            f"""
-            <div class="glass score-box">
+                    <div class="metric-label">
+                        {label}
+                    </div>
 
-            <div style="
-                font-size:25px;
-                font-weight:850;
-            ">
-            {balance}
-            </div>
+                    <div class="risk-value {css}"
+                         style="margin-top:10px;">
+                        {int(value)}/100
+                    </div>
 
-            <div class="score-caption">
-            BALANCE SHEET
-            </div>
+                    <div style="
+                        margin-top:10px;
+                        height:6px;
+                        background:rgba(255,255,255,.06);
+                        border-radius:999px;
+                    ">
+                        <div style="
+                            width:{int(value)}%;
+                            height:100%;
+                            border-radius:999px;
+                            background:linear-gradient(
+                                90deg,
+                                #4fd6a0,
+                                #f1c95d,
+                                #ff6375
+                            );
+                        "></div>
+                    </div>
 
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
+    st.write("")
+
+    local = local_ai_memo(
+        ticker,
+        fundamentals,
+        technicals,
+        brain,
+        scenarios,
+    )
 
     st.markdown(
-        """
-        <div class="glass">
+        f"""
+        <div class="thesis-card">
 
-        <div class="brain-label">
-        RISK FRAMEWORK
-        </div>
+            <div class="metric-label">
+                RISK COMMITTEE
+            </div>
 
-        <div style="
-            line-height:1.8;
-            color:rgba(255,255,255,.62);
-            font-size:13px;
-            margin-top:12px;
-        ">
+            <div class="thesis-text"
+                 style="margin-top:14px;">
+                {local['risk']}
+            </div>
 
-        <b>1 · Valuation Risk</b><br>
-        High valuation multiples can create downside
-        asymmetry when expectations reset.
+            <div style="
+                height:1px;
+                background:rgba(255,255,255,.06);
+                margin:18px 0;
+            "></div>
 
-        <br><br>
+            <div class="metric-label">
+                WHAT CAN BREAK THE THESIS
+            </div>
 
-        <b>2 · Balance Sheet Risk</b><br>
-        Leverage and liquidity conditions influence
-        financial resilience.
-
-        <br><br>
-
-        <b>3 · Momentum Risk</b><br>
-        Extremely overbought conditions can increase
-        short-term volatility.
-
-        <br><br>
-
-        <b>4 · Trend Risk</b><br>
-        Persistent price weakness can indicate deteriorating
-        market structure.
-
-        <br><br>
-
-        <b>5 · Model Risk</b><br>
-        AI scores are decision-support signals, not
-        guarantees of future returns.
-
-        </div>
+            <div class="thesis-text"
+                 style="margin-top:14px;">
+                • Earnings expectations fall sharply<br>
+                • Valuation multiple compresses<br>
+                • Growth decelerates faster than expected<br>
+                • Macro liquidity deteriorates<br>
+                • Company-specific competitive pressure increases
+            </div>
 
         </div>
         """,
@@ -2550,321 +3518,142 @@ with tabs[5]:
 
     st.markdown(
         """
-        <div class="brain-card">
-
-        <div class="brain-label">
-        PERPLEXITY-STYLE RESEARCH LAYER
-        </div>
-
-        <div class="brain-title">
-        Ask the Investment Brain
-        </div>
-
-        <div class="brain-description">
-        Run a multi-agent research committee combining
-        business quality, valuation, growth, technical structure
-        and event-driven reasoning.
-        </div>
-
+        <div class="section-head">
+            <div>
+                <div class="section-title">
+                    Research Terminal
+                </div>
+                <div class="section-subtitle">
+                    INSTITUTIONAL-STYLE INVESTMENT MEMO
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.write("")
+    local = local_ai_memo(
+        ticker,
+        fundamentals,
+        technicals,
+        brain,
+        scenarios,
+    )
 
-    if not AI_BACKEND:
+    c1, c2 = st.columns(
+        [1, 2]
+    )
 
-        st.warning(
-            """
-            AI backend is not installed.
+    with c1:
 
-            Connect `ai.orchestrator` to activate the
-            full Investment Committee.
-            """
+        st.markdown(
+            f"""
+            <div class="brain">
+
+                <div class="metric-label">
+                    RECOMMENDATION
+                </div>
+
+                <div style="
+                    font-size:28px;
+                    font-weight:850;
+                    margin-top:12px;
+                ">
+                    {brain['decision']}
+                </div>
+
+                <div style="
+                    margin-top:20px;
+                    color:#8992a3;
+                    font-size:11px;
+                    line-height:1.7;
+                ">
+                    Conviction:
+                    <b style="color:#e8ecf4;">
+                        {brain['conviction']}/100
+                    </b>
+                    <br>
+                    Risk:
+                    <b style="color:#e8ecf4;">
+                        {brain['risk']}/100
+                    </b>
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    else:
+    with c2:
 
-        if ai_status.get("configured"):
+        st.markdown(
+            f"""
+            <div class="thesis-card">
 
-            launch = st.button(
-                "🧠  Launch Deep Investment Research",
-                use_container_width=True,
-                type="primary",
-            )
+                <div class="metric-label">
+                    CORE THESIS
+                </div>
 
-            if launch:
+                <div class="thesis-text"
+                     style="margin-top:14px;">
+                    {local['thesis']}
+                </div>
 
-                context = {
-                    "ticker": ticker,
-                    "quote": quote,
-                    "fundamentals": fundamentals,
-                    "technicals": technicals,
-                    "brain_scores": brain,
-                    "timestamp": datetime.now().isoformat(),
-                }
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-                try:
+    st.write("")
 
-                    st.session_state.research_running = True
+    sections = [
+        (
+            "01 · BUSINESS QUALITY",
+            local["quality"],
+        ),
+        (
+            "02 · GROWTH",
+            local["growth"],
+        ),
+        (
+            "03 · VALUATION",
+            local["valuation"],
+        ),
+        (
+            "04 · TECHNICAL STRUCTURE",
+            local["technical"],
+        ),
+        (
+            "05 · RISK",
+            local["risk"],
+        ),
+    ]
 
-                    with st.spinner(
-                        "Investment Brain is assembling the committee..."
-                    ):
+    for title, text in sections:
 
-                        report = run_full_ai_research(
-                            ticker,
-                            context,
-                        )
+        st.markdown(
+            f"""
+            <div class="glass-soft"
+                 style="padding:18px;
+                        margin-bottom:10px;">
 
-                    st.session_state.ai_report = report
-                    st.session_state.research_running = False
-
-                except Exception as exc:
-
-                    st.session_state.research_running = False
-
-                    st.error(
-                        f"Research engine error: {exc}"
-                    )
-
-
-            report = st.session_state.ai_report
-
-            if report:
-
-                st.divider()
-
-                committee = safe_dict(
-                    report.get(
-                        "committee",
-                        {}
-                    )
-                )
-
-                st.markdown(
-                    '<div class="section-title">Investment Committee</div>',
-                    unsafe_allow_html=True,
-                )
-
-                if committee.get("success"):
-
-                    st.markdown(
-                        f"""
-                        <div class="glass">
-
-                        <div class="research">
-                        {committee.get("content", "No committee conclusion.")}
-                        </div>
-
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                else:
-
-                    st.warning(
-                        committee.get(
-                            "error",
-                            "Committee unavailable.",
-                        )
-                    )
-
-
-                agents = report.get(
-                    "agents",
-                    [],
-                )
-
-                if agents:
-
-                    st.markdown(
-                        '<div class="section-title">Agent Matrix</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    agent_cols = st.columns(
-                        min(
-                            len(agents),
-                            4,
-                        )
-                    )
-
-                    for index, agent in enumerate(
-                        agents
-                    ):
-
-                        agent = safe_dict(agent)
-
-                        with agent_cols[
-                            index % len(agent_cols)
-                        ]:
-
-                            name = str(
-                                agent.get(
-                                    "agent",
-                                    "Agent",
-                                )
-                            ).replace(
-                                "_",
-                                " ",
-                            ).upper()
-
-                            conclusion = agent.get(
-                                "conclusion",
-                                "No conclusion.",
-                            )
-
-                            st.markdown(
-                                f"""
-                                <div class="agent">
-
-                                <div class="agent-name">
-                                {name}
-                                </div>
-
-                                <div class="agent-note"
-                                style="
-                                    margin-top:12px;
-                                    line-height:1.6;
-                                ">
-                                {conclusion[:650]}
-                                </div>
-
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-
-
-                debate = safe_dict(
-                    report.get(
-                        "debate",
-                        {},
-                    )
-                )
-
-                if debate:
-
-                    st.markdown(
-                        '<div class="section-title">Bull vs Bear</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    if debate.get("success"):
-
-                        st.markdown(
-                            f"""
-                            <div class="glass">
-
-                            <div class="research">
-                            {debate.get("content", "")}
-                            </div>
-
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-
-                    else:
-
-                        st.warning(
-                            debate.get(
-                                "error",
-                                "Debate unavailable.",
-                            )
-                        )
-
-        else:
-
-            st.markdown(
-                """
-                <div class="glass"
-                style="text-align:center;padding:45px;">
-
-                <div style="
-                    font-size:38px;
-                    margin-bottom:10px;
-                ">
-                ◈
+                <div class="metric-label">
+                    {title}
                 </div>
 
                 <div style="
-                    font-size:20px;
-                    font-weight:850;
-                ">
-                Investment Brain is sleeping
-                </div>
-
-                <div style="
-                    color:rgba(255,255,255,.43);
+                    margin-top:9px;
+                    color:#a5adbc;
                     font-size:12px;
-                    margin-top:7px;
+                    line-height:1.7;
                 ">
-                Configure your AI provider API key
-                to activate the research committee.
+                    {text}
                 </div>
 
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-# ============================================================
-# BOTTOM INTELLIGENCE BAR
-# ============================================================
-
-st.write("")
-
-st.markdown(
-    f"""
-    <div class="glass"
-    style="
-        padding:15px 20px;
-        display:flex;
-        justify-content:space-between;
-        align-items:center;
-        gap:20px;
-    ">
-
-    <div>
-
-    <span style="
-        font-size:10px;
-        color:rgba(255,255,255,.36);
-        letter-spacing:1px;
-    ">
-    SIMON BRAIN
-    </span>
-
-    <span style="
-        font-size:12px;
-        margin-left:12px;
-        font-weight:700;
-    ">
-    {ticker}
-    </span>
-
-    </div>
-
-    <div style="
-        font-size:10px;
-        color:rgba(255,255,255,.38);
-    ">
-    Conviction {brain["conviction"]}/100
-    &nbsp; · &nbsp;
-    Trend {technicals.get("trend", "—")}
-    &nbsp; · &nbsp;
-    Risk {brain["risk"]}/100
-    </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ============================================================
@@ -2875,16 +3664,34 @@ st.markdown(
     f"""
     <div class="footer">
 
-    ◈ SIMON INVESTMENT BRAIN V14.0
-    &nbsp; · &nbsp;
-    AI-NATIVE US EQUITY INTELLIGENCE TERMINAL
-    &nbsp; · &nbsp;
-    {datetime.now().strftime("%Y-%m-%d %H:%M")}
+        <b style="color:#727b8b;">
+            {APP_NAME} V{APP_VERSION}
+        </b>
 
-    <br><br>
+        &nbsp;·&nbsp;
 
-    Research and decision-support tool only.
-    Not financial advice.
+        AI-native US equity research terminal
+
+        <br>
+
+        Data:
+        {market_source}
+        &nbsp;·&nbsp;
+        Fundamentals:
+        {fundamental_source}
+        &nbsp;·&nbsp;
+        AI:
+        {
+            "LLM + Quant"
+            if ai_cfg["configured"]
+            else "Local Quant Brain"
+        }
+
+        <br><br>
+
+        Research tool only.
+        AI scores, valuation scenarios and research outputs
+        are analytical frameworks, not financial advice.
 
     </div>
     """,
